@@ -1,0 +1,154 @@
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+SCHEMA_VERSION = 2
+
+DDL = """
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version INTEGER PRIMARY KEY
+);
+
+CREATE TABLE IF NOT EXISTS clients (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  external_id TEXT UNIQUE,
+  name TEXT NOT NULL DEFAULT '',
+  inn TEXT NOT NULL DEFAULT '',
+  contacts TEXT NOT NULL DEFAULT '',
+  addresses TEXT NOT NULL DEFAULT '',
+  unload_points TEXT NOT NULL DEFAULT '',
+  contact_person TEXT NOT NULL DEFAULT '',
+  email TEXT NOT NULL DEFAULT '',
+  city_region_zip TEXT NOT NULL DEFAULT '',
+  consignee_name TEXT NOT NULL DEFAULT '',
+  consignee_contact_person TEXT NOT NULL DEFAULT '',
+  consignee_address TEXT NOT NULL DEFAULT '',
+  consignee_city_region_zip TEXT NOT NULL DEFAULT '',
+  consignee_phone TEXT NOT NULL DEFAULT '',
+  consignee_email TEXT NOT NULL DEFAULT '',
+  is_new INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS products (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  external_id TEXT UNIQUE,
+  name TEXT NOT NULL DEFAULT '',
+  base_price REAL NOT NULL DEFAULT 0,
+  box_barcode TEXT NOT NULL DEFAULT '',
+  unit TEXT NOT NULL DEFAULT 'кор',
+  units_per_box INTEGER NOT NULL DEFAULT 0,
+  regular_piece_price REAL NOT NULL DEFAULT 0,
+  boxes_per_pallet REAL NOT NULL DEFAULT 0,
+  gross_weight_kg REAL NOT NULL DEFAULT 0,
+  volume_m3 REAL NOT NULL DEFAULT 0,
+  imported_at TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS promotions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product_id INTEGER NOT NULL UNIQUE REFERENCES products(id) ON DELETE CASCADE,
+  promo_type TEXT NOT NULL DEFAULT '',
+  discount_percent REAL NOT NULL DEFAULT 0,
+  valid_from TEXT NOT NULL,
+  valid_to TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  action TEXT NOT NULL,
+  entity TEXT,
+  details TEXT
+);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_clients_inn ON clients(inn);
+CREATE INDEX IF NOT EXISTS idx_products_external ON products(external_id);
+"""
+
+
+def connect(path: Path | None = None) -> sqlite3.Connection:
+    from crm_desktop.config import db_path
+
+    p = path or db_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(p))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def init_db(conn: sqlite3.Connection) -> None:
+    conn.executescript(DDL)
+    _migrate_v2(conn)
+    row = conn.execute(
+        "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        conn.execute("INSERT INTO schema_migrations(version) VALUES (?)", (SCHEMA_VERSION,))
+    elif int(row[0]) < SCHEMA_VERSION:
+        conn.execute("INSERT INTO schema_migrations(version) VALUES (?)", (SCHEMA_VERSION,))
+    conn.commit()
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return {str(r[1]) for r in rows}
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column_sql: str, col_name: str) -> None:
+    cols = _table_columns(conn, table)
+    if col_name not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_sql}")
+
+
+def _migrate_v2(conn: sqlite3.Connection) -> None:
+    # clients
+    _add_column_if_missing(conn, "clients", "contact_person TEXT NOT NULL DEFAULT ''", "contact_person")
+    _add_column_if_missing(conn, "clients", "email TEXT NOT NULL DEFAULT ''", "email")
+    _add_column_if_missing(conn, "clients", "city_region_zip TEXT NOT NULL DEFAULT ''", "city_region_zip")
+    _add_column_if_missing(conn, "clients", "consignee_name TEXT NOT NULL DEFAULT ''", "consignee_name")
+    _add_column_if_missing(
+        conn,
+        "clients",
+        "consignee_contact_person TEXT NOT NULL DEFAULT ''",
+        "consignee_contact_person",
+    )
+    _add_column_if_missing(conn, "clients", "consignee_address TEXT NOT NULL DEFAULT ''", "consignee_address")
+    _add_column_if_missing(
+        conn,
+        "clients",
+        "consignee_city_region_zip TEXT NOT NULL DEFAULT ''",
+        "consignee_city_region_zip",
+    )
+    _add_column_if_missing(conn, "clients", "consignee_phone TEXT NOT NULL DEFAULT ''", "consignee_phone")
+    _add_column_if_missing(conn, "clients", "consignee_email TEXT NOT NULL DEFAULT ''", "consignee_email")
+    # products
+    _add_column_if_missing(conn, "products", "box_barcode TEXT NOT NULL DEFAULT ''", "box_barcode")
+    _add_column_if_missing(conn, "products", "unit TEXT NOT NULL DEFAULT 'кор'", "unit")
+    _add_column_if_missing(conn, "products", "units_per_box INTEGER NOT NULL DEFAULT 0", "units_per_box")
+    _add_column_if_missing(
+        conn,
+        "products",
+        "regular_piece_price REAL NOT NULL DEFAULT 0",
+        "regular_piece_price",
+    )
+    _add_column_if_missing(
+        conn,
+        "products",
+        "boxes_per_pallet REAL NOT NULL DEFAULT 0",
+        "boxes_per_pallet",
+    )
+    _add_column_if_missing(conn, "products", "gross_weight_kg REAL NOT NULL DEFAULT 0", "gross_weight_kg")
+    _add_column_if_missing(conn, "products", "volume_m3 REAL NOT NULL DEFAULT 0", "volume_m3")
