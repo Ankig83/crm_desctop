@@ -16,12 +16,15 @@ class PromotionRow:
     discount_percent: float
     valid_from_iso: str
     valid_to_iso: str
+    bonus_other_product_ids: str
+    matrix_rules_json: str
 
 
 def list_all(conn: sqlite3.Connection) -> list[PromotionRow]:
     rows = conn.execute(
         """
-        SELECT p.id, p.product_id, pr.name, pr.external_id, p.promo_type, p.discount_percent, p.valid_from, p.valid_to
+        SELECT p.id, p.product_id, pr.name, pr.external_id, p.promo_type, p.discount_percent, p.valid_from, p.valid_to,
+               COALESCE(p.bonus_other_product_ids, ''), COALESCE(p.matrix_rules_json, '')
         FROM promotions p
         JOIN products pr ON pr.id = p.product_id
         ORDER BY p.id
@@ -37,6 +40,8 @@ def list_all(conn: sqlite3.Connection) -> list[PromotionRow]:
             discount_percent=float(r[5] or 0),
             valid_from_iso=r[6],
             valid_to_iso=r[7],
+            bonus_other_product_ids=r[8] or "",
+            matrix_rules_json=r[9] or "",
         )
         for r in rows
     ]
@@ -45,7 +50,8 @@ def list_all(conn: sqlite3.Connection) -> list[PromotionRow]:
 def get_for_product(conn: sqlite3.Connection, product_id: int) -> PromotionRow | None:
     r = conn.execute(
         """
-        SELECT p.id, p.product_id, pr.name, pr.external_id, p.promo_type, p.discount_percent, p.valid_from, p.valid_to
+        SELECT p.id, p.product_id, pr.name, pr.external_id, p.promo_type, p.discount_percent, p.valid_from, p.valid_to,
+               COALESCE(p.bonus_other_product_ids, ''), COALESCE(p.matrix_rules_json, '')
         FROM promotions p
         JOIN products pr ON pr.id = p.product_id
         WHERE p.product_id = ?
@@ -63,6 +69,8 @@ def get_for_product(conn: sqlite3.Connection, product_id: int) -> PromotionRow |
         discount_percent=float(r[5] or 0),
         valid_from_iso=r[6],
         valid_to_iso=r[7],
+        bonus_other_product_ids=r[8] or "",
+        matrix_rules_json=r[9] or "",
     )
 
 
@@ -74,20 +82,43 @@ def upsert(
     discount_percent: float,
     valid_from_iso: str,
     valid_to_iso: str,
+    bonus_other_product_ids: str = "",
+    matrix_rules_json: str = "",
 ) -> None:
     t = ts_now()
     row = conn.execute("SELECT id FROM promotions WHERE product_id = ?", (product_id,)).fetchone()
     if row:
         conn.execute(
-            """UPDATE promotions SET promo_type=?, discount_percent=?, valid_from=?, valid_to=?, updated_at=?
+            """UPDATE promotions SET promo_type=?, discount_percent=?, valid_from=?, valid_to=?,
+                      bonus_other_product_ids=?, matrix_rules_json=?, updated_at=?
                WHERE product_id=?""",
-            (promo_type, discount_percent, valid_from_iso, valid_to_iso, t, product_id),
+            (
+                promo_type,
+                discount_percent,
+                valid_from_iso,
+                valid_to_iso,
+                bonus_other_product_ids,
+                matrix_rules_json,
+                t,
+                product_id,
+            ),
         )
     else:
         conn.execute(
-            """INSERT INTO promotions(product_id, promo_type, discount_percent, valid_from, valid_to, updated_at)
-               VALUES (?,?,?,?,?,?)""",
-            (product_id, promo_type, discount_percent, valid_from_iso, valid_to_iso, t),
+            """INSERT INTO promotions(
+                   product_id, promo_type, discount_percent, valid_from, valid_to,
+                   bonus_other_product_ids, matrix_rules_json, updated_at
+               ) VALUES (?,?,?,?,?,?,?,?)""",
+            (
+                product_id,
+                promo_type,
+                discount_percent,
+                valid_from_iso,
+                valid_to_iso,
+                bonus_other_product_ids,
+                matrix_rules_json,
+                t,
+            ),
         )
     conn.commit()
 

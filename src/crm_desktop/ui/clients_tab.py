@@ -5,6 +5,7 @@ import sqlite3
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -14,6 +15,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -63,7 +66,7 @@ class ClientsTab(QWidget):
         self._c_contact.setPlaceholderText("Контактное лицо грузополучателя")
         self._c_address = QPlainTextEdit()
         self._c_address.setPlaceholderText("Адрес грузополучателя")
-        self._c_address.setMaximumHeight(72)
+        self._c_address.setMinimumHeight(96)
         self._c_city = QLineEdit()
         self._c_city.setPlaceholderText("Город / индекс грузополучателя")
         self._c_phone = QLineEdit()
@@ -88,7 +91,13 @@ class ClientsTab(QWidget):
         btn_del.clicked.connect(self._delete_current)
 
         gb_con = QGroupBox("Грузополучатель (для RUS)")
+        gb_con.setStyleSheet(
+            "QGroupBox { font-size: 11pt; font-weight: 600; }"
+            "QGroupBox QLabel { font-size: 10pt; font-weight: normal; }"
+            "QGroupBox QLineEdit, QGroupBox QPlainTextEdit { font-size: 10pt; min-height: 1.4em; }"
+        )
         gl = QVBoxLayout(gb_con)
+        gl.setSpacing(6)
         gl.addWidget(QLabel("Название компании"))
         gl.addWidget(self._c_name)
         gl.addWidget(QLabel("Контактное лицо"))
@@ -103,7 +112,13 @@ class ClientsTab(QWidget):
         gl.addWidget(self._c_email)
 
         form = QVBoxLayout()
-        form.addWidget(QLabel("Редактирование"))
+        form.setSpacing(6)
+        title = QLabel("Редактирование")
+        title_font = title.font()
+        title_font.setPointSizeF(title_font.pointSizeF() + 1.0)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        form.addWidget(title)
         form.addWidget(QLabel("ID (внешний)"))
         form.addWidget(self._ext)
         form.addWidget(QLabel("Название"))
@@ -117,11 +132,11 @@ class ClientsTab(QWidget):
         form.addWidget(QLabel("Город / индекс"))
         form.addWidget(self._city_region_zip)
         form.addWidget(QLabel("Контакты (телефоны и др.)"))
-        form.addWidget(self._contacts, 1)
+        form.addWidget(self._contacts)
         form.addWidget(QLabel("Адреса"))
-        form.addWidget(self._addresses, 1)
+        form.addWidget(self._addresses)
         form.addWidget(QLabel("Пункты разгрузки"))
-        form.addWidget(self._unload, 1)
+        form.addWidget(self._unload)
         form.addWidget(gb_con)
         form.addWidget(self._is_new)
         row = QHBoxLayout()
@@ -129,12 +144,25 @@ class ClientsTab(QWidget):
         row.addWidget(btn_del)
         form.addLayout(row)
 
-        right = QWidget()
-        right.setLayout(form)
+        _h_text = 100
+        for te in (self._contacts, self._addresses, self._unload):
+            te.setMinimumHeight(_h_text)
+            te.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+
+        form_root = QWidget()
+        form_root.setMinimumWidth(340)
+        form_root.setLayout(form)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setWidget(form_root)
 
         split = QSplitter()
         split.addWidget(self._list)
-        split.addWidget(right)
+        split.addWidget(scroll)
         split.setStretchFactor(1, 1)
 
         lay = QVBoxLayout(self)

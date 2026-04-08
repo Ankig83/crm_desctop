@@ -10,6 +10,7 @@ from crm_desktop.adapters import excel_io
 from crm_desktop.repositories import audit
 from crm_desktop.services.backup import copy_database_to
 from crm_desktop.ui.clients_tab import ClientsTab
+from crm_desktop.ui.history_tab import HistoryTab
 from crm_desktop.ui.products_tab import ProductsTab
 from crm_desktop.ui.promotions_tab import PromotionsTab
 from crm_desktop.ui.quote_tab import QuoteTab
@@ -28,10 +29,12 @@ class MainWindow(QMainWindow):
         self._products = ProductsTab(conn)
         self._promotions = PromotionsTab(conn)
         self._quote = QuoteTab(conn)
+        self._history = HistoryTab(conn)
         tabs.addTab(self._clients, "Клиенты")
         tabs.addTab(self._products, "Товары")
         tabs.addTab(self._promotions, "Акции")
         tabs.addTab(self._quote, "Расчёт")
+        tabs.addTab(self._history, "История")
         tabs.currentChanged.connect(self._on_tab_changed)
         self.setCentralWidget(tabs)
         self._tabs = tabs
@@ -48,6 +51,8 @@ class MainWindow(QMainWindow):
             self._products.reload()
         elif w is self._promotions:
             self._promotions.reload()
+        elif w is self._history:
+            self._history.reload()
 
     def _build_menu(self) -> None:
         bar = self.menuBar()
@@ -87,7 +92,7 @@ class MainWindow(QMainWindow):
 
         m_file.addSeparator()
 
-        a_set = QAction("Настройки SMTP…", self)
+        a_set = QAction("Настройки…", self)
         a_set.triggered.connect(self._settings)
         m_file.addAction(a_set)
 

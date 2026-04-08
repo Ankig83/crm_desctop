@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -21,11 +22,12 @@ from PySide6.QtWidgets import (
     QInputDialog,
 )
 
+from crm_desktop.adapters.quote_pdf import export_quote_pdf
 from crm_desktop.adapters.rus_export import RusLine, export_rus_variant_a
-from crm_desktop.repositories import audit, clients, products, promotions
+from crm_desktop.repositories import audit, calculation_sessions, clients, products, promotions
 from crm_desktop.services import email_send
 from crm_desktop.services.pricing import line_total
-from crm_desktop.utils.dates import parse_dmY, parse_iso
+from crm_desktop.utils.dates import iso, parse_dmY, parse_iso
 
 
 class QuoteTab(QWidget):
@@ -56,13 +58,17 @@ class QuoteTab(QWidget):
         btn_calc.clicked.connect(self._recalc)
         btn_export = QPushButton("Сохранить расчёт (TXT)…")
         btn_export.clicked.connect(self._export_txt)
+        btn_export_pdf = QPushButton("Сохранить расчёт (PDF)…")
+        btn_export_pdf.clicked.connect(self._export_pdf)
         btn_export_rus = QPushButton("Сформировать RUS.xlsx…")
         btn_export_rus.clicked.connect(self._export_rus)
+        btn_save_session = QPushButton("Сохранить в историю")
+        btn_save_session.clicked.connect(self._save_session_action)
         btn_mail = QPushButton("Отправить на e-mail…")
         btn_mail.clicked.connect(self._send_mail)
 
         row = QHBoxLayout()
-        for b in (btn_line, btn_del, btn_calc, btn_export, btn_export_rus, btn_mail):
+        for b in (btn_line, btn_del, btn_calc, btn_export, btn_export_pdf, btn_export_rus, btn_save_session, btn_mail):
             row.addWidget(b)
         row.addStretch()
 
@@ -204,6 +210,66 @@ class QuoteTab(QWidget):
         lines.append(f"Итого: {grand:.2f}")
         return "\n".join(lines)
 
+    def _session_payload(self) -> tuple[float, list[calculation_sessions.SessionLine]]:
+        qd = self._quote_date()
+        total = 0.0
+        payload: list[calculation_sessions.SessionLine] = []
+        for r in range(self._table.rowCount()):
+            w = self._table.cellWidget(r, 1)
+            if not isinstance(w, QComboBox):
+                continue
+            pid = w.currentData()
+            p = products.get(self._conn, int(pid)) if pid is not None else None
+            if not p:
+                continue
+            qty_it = self._table.item(r, 3)
+            qty_s = qty_it.text().strip() if qty_it else "1"
+            try:
+                qty = float(qty_s.replace(",", "."))
+            except ValueError:
+                qty = 0.0
+            promo = promotions.get_for_product(self._conn, p.id)
+            vf = parse_iso(promo.valid_from_iso) if promo else None
+            vt = parse_iso(promo.valid_to_iso) if promo else None
+            disc = promo.discount_percent if promo else 0.0
+            applied_disc = disc if (vf and vt and vf <= qd <= vt and disc > 0) else 0.0
+            sub = line_total(p.base_price, qty, disc, qd, vf, vt)
+            total += sub
+            payload.append(
+                calculation_sessions.SessionLine(
+                    product_id=p.id,
+                    product_external_id=p.external_id or "",
+                    product_name=p.name,
+                    qty=qty,
+                    base_price=p.base_price,
+                    discount_percent=applied_disc,
+                    line_total=sub,
+                )
+            )
+        return total, payload
+
+    def _save_session(self) -> int | None:
+        total, lines = self._session_payload()
+        if not lines:
+            QMessageBox.warning(self, "История расчётов", "Нет строк расчёта для сохранения.")
+            return None
+        cid = self._client.currentData()
+        sid = calculation_sessions.create(
+            self._conn,
+            quote_date_iso=iso(self._quote_date()),
+            client_id=int(cid) if cid is not None else None,
+            total=total,
+            details={"total_rows": len(lines)},
+            lines=lines,
+        )
+        audit.log(self._conn, "create", "calculation_session", str(sid))
+        return sid
+
+    def _save_session_action(self) -> None:
+        sid = self._save_session()
+        if sid is not None:
+            QMessageBox.information(self, "История расчётов", f"Сессия сохранена: #{sid}")
+
     def _collect_rus_lines(self) -> list[RusLine]:
         qd = self._quote_date()
         out: list[RusLine] = []
@@ -226,6 +292,14 @@ class QuoteTab(QWidget):
             vt = parse_iso(promo.valid_to_iso) if promo else None
             disc = promo.discount_percent if promo else 0.0
             sub = line_total(p.base_price, qty, disc, qd, vf, vt)
+            matrix_rules: dict[str, str | int | float] = {}
+            if promo and promo.matrix_rules_json:
+                try:
+                    raw_rules = json.loads(promo.matrix_rules_json)
+                    if isinstance(raw_rules, dict):
+                        matrix_rules = {str(k): v for k, v in raw_rules.items()}
+                except Exception:  # noqa: BLE001
+                    matrix_rules = {}
             out.append(
                 RusLine(
                     external_id=p.external_id or "",
@@ -246,6 +320,7 @@ class QuoteTab(QWidget):
                     base_price=p.base_price,
                     discount_percent=disc if (vf and vt and vf <= qd <= vt and disc > 0) else 0.0,
                     line_total=sub,
+                    matrix_rules=matrix_rules,
                 )
             )
         return out
@@ -255,8 +330,21 @@ class QuoteTab(QWidget):
         if not path:
             return
         Path(path).write_text(self._build_text(), encoding="utf-8")
+        self._save_session()
         audit.log(self._conn, "export", "quote_txt", path)
         QMessageBox.information(self, "Готово", "Файл сохранён.")
+
+    def _export_pdf(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Сохранить PDF", "quote.pdf", "PDF (*.pdf)")
+        if not path:
+            return
+        try:
+            export_quote_pdf(Path(path), self._build_text())
+            self._save_session()
+            audit.log(self._conn, "export", "quote_pdf", path)
+            QMessageBox.information(self, "Готово", "PDF сохранён.")
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Ошибка", str(e))
 
     def _export_rus(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "Сформировать RUS.xlsx", "RUS.xlsx", "Excel (*.xlsx)")
@@ -271,6 +359,7 @@ class QuoteTab(QWidget):
                 quote_date=self._quote_date(),
                 lines=self._collect_rus_lines(),
             )
+            self._save_session()
             audit.log(self._conn, "export", "rus_xlsx", path)
             QMessageBox.information(self, "Готово", "RUS.xlsx сформирован.")
         except Exception as e:  # noqa: BLE001
@@ -294,6 +383,7 @@ class QuoteTab(QWidget):
                 body,
                 tmp_path,
             )
+            self._save_session()
             audit.log(self._conn, "email", "quote", to_s.strip())
             QMessageBox.information(self, "Готово", "Письмо отправлено.")
         except Exception as e:  # noqa: BLE001

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from dataclasses import dataclass, field
@@ -9,6 +10,11 @@ from typing import Any
 from openpyxl import Workbook, load_workbook
 
 from crm_desktop.repositories import audit, clients, products, promotions
+from crm_desktop.utils.bonus_ids import (
+    missing_product_external_ids,
+    normalize_product_external_ids_csv,
+    parse_product_external_ids_csv,
+)
 from crm_desktop.utils.dates import format_dmY, iso, parse_dmY, parse_iso
 from crm_desktop.utils.validation import normalize_inn
 
@@ -24,6 +30,10 @@ class ImportReport:
     clients_rows: int = 0
     products_rows: int = 0
     promotions_rows: int = 0
+
+
+def _row_is_empty(row: tuple[Any, ...]) -> bool:
+    return all(v is None or str(v).strip() == "" for v in row)
 
 
 def _header_map(row: tuple[Any, ...]) -> dict[str, int]:
@@ -46,6 +56,15 @@ def _cell(row: tuple[Any, ...], m: dict[str, int], *names: str) -> str:
     return ""
 
 
+def _raw_cell_by_index(row: tuple[Any, ...], idx: int) -> str:
+    if idx < 0 or idx >= len(row):
+        return ""
+    v = row[idx]
+    if v is None:
+        return ""
+    return str(v).strip()
+
+
 def _float_cell(row: tuple[Any, ...], m: dict[str, int], *names: str) -> float | None:
     s = _cell(row, m, *names)
     if s == "":
@@ -55,6 +74,84 @@ def _float_cell(row: tuple[Any, ...], m: dict[str, int], *names: str) -> float |
         return float(s)
     except ValueError:
         return None
+
+
+def _find_header_row(
+    rows: list[tuple[Any, ...]],
+    required_headers: tuple[str, ...],
+) -> tuple[int, tuple[Any, ...], dict[str, int]] | None:
+    for idx, row in enumerate(rows):
+        if _row_is_empty(row):
+            continue
+        hm = _header_map(row)
+        if all(_norm_header(h) in hm for h in required_headers):
+            return idx, row, hm
+    return None
+
+
+def _load_rows_with_openpyxl(path: Path) -> list[tuple[Any, ...]]:
+    wb = load_workbook(path, read_only=True, data_only=True)
+    ws = wb.active
+    return [tuple(r) for r in ws.iter_rows(values_only=True)]
+
+
+def _load_rows_with_calamine(path: Path) -> list[tuple[Any, ...]]:
+    try:
+        import pandas as pd
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError("Для fallback-импорта нужен pandas.") from e
+    try:
+        df = pd.read_excel(path, sheet_name=0, engine="calamine", header=None, dtype=str)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError("Не удалось прочитать файл через calamine.") from e
+    rows: list[tuple[Any, ...]] = []
+    for rec in df.itertuples(index=False, name=None):
+        cleaned: list[str] = []
+        for v in rec:
+            s = "" if v is None else str(v)
+            if s.strip().lower() == "nan":
+                s = ""
+            cleaned.append(s)
+        rows.append(tuple(cleaned))
+    return rows
+
+
+def _extract_matrix_rules_json(
+    row: tuple[Any, ...],
+    header_row: tuple[Any, ...],
+    hm: dict[str, int],
+) -> str:
+    known = {
+        _norm_header("id товара"),
+        _norm_header("id"),
+        _norm_header("тип акции"),
+        _norm_header("тип"),
+        _norm_header("размер скидки"),
+        _norm_header("скидка"),
+        _norm_header("скидка %"),
+        _norm_header("дата начала"),
+        _norm_header("начало"),
+        _norm_header("дата окончания"),
+        _norm_header("окончание"),
+        _norm_header("конец"),
+        _norm_header("id товаров-бонусов (через запятую)"),
+        _norm_header("id товаров бонуса"),
+        _norm_header("id товаров-бонусов"),
+        _norm_header("бонусные id"),
+        _norm_header("id бонусных товаров"),
+        _norm_header("id бонусов"),
+        _norm_header("товары бонусом"),
+    }
+    matrix: dict[str, str] = {}
+    for h, idx in hm.items():
+        if h in known:
+            continue
+        val = _raw_cell_by_index(row, idx)
+        original_header = _raw_cell_by_index(header_row, idx)
+        matrix[(original_header or h)] = val
+    if not matrix:
+        return ""
+    return json.dumps(matrix, ensure_ascii=False)
 
 
 def import_clients(conn: sqlite3.Connection, path: Path) -> ImportReport:
@@ -68,7 +165,7 @@ def import_clients(conn: sqlite3.Connection, path: Path) -> ImportReport:
         return rep
     hm = _header_map(header)
     for line_no, row in enumerate(rows, start=2):
-        if row is None or all(v is None or str(v).strip() == "" for v in row):
+        if row is None or _row_is_empty(row):
             continue
         ext = _cell(row, hm, "id клиента", "id")
         name = _cell(row, hm, "название", "наименование")
@@ -161,7 +258,7 @@ def import_products(conn: sqlite3.Connection, path: Path) -> ImportReport:
         return rep
     hm = _header_map(header)
     for line_no, row in enumerate(rows, start=2):
-        if row is None or all(v is None or str(v).strip() == "" for v in row):
+        if row is None or _row_is_empty(row):
             continue
         ext = _cell(row, hm, "id товара", "id")
         name = _cell(row, hm, "наименование", "название")
@@ -248,23 +345,50 @@ def import_products(conn: sqlite3.Connection, path: Path) -> ImportReport:
 
 def import_promotions(conn: sqlite3.Connection, path: Path) -> ImportReport:
     rep = ImportReport()
-    wb = load_workbook(path, read_only=True, data_only=True)
-    ws = wb.active
-    rows = ws.iter_rows(values_only=True)
-    header = next(rows, None)
-    if not header:
+    required_headers = ("id товара", "размер скидки")
+    rows_data: list[tuple[Any, ...]]
+    try:
+        rows_data = _load_rows_with_openpyxl(path)
+    except Exception as e_openpyxl:  # noqa: BLE001
+        try:
+            rows_data = _load_rows_with_calamine(path)
+        except Exception as e_calamine:  # noqa: BLE001
+            rep.errors.append(
+                "Не удалось прочитать файл акций. "
+                f"openpyxl: {e_openpyxl}. calamine: {e_calamine}"
+            )
+            return rep
+
+    if not rows_data:
         rep.errors.append("Файл акций пуст.")
         return rep
-    hm = _header_map(header)
+    header_info = _find_header_row(rows_data, required_headers)
+    if header_info is None:
+        rep.errors.append(
+            "Не найдена строка заголовков акций (ожидаются колонки 'ID товара' и 'Размер скидки')."
+        )
+        return rep
+    header_idx, header_row, hm = header_info
     seen_products: set[str] = set()
-    for line_no, row in enumerate(rows, start=2):
-        if row is None or all(v is None or str(v).strip() == "" for v in row):
+    for line_no, row in enumerate(rows_data[header_idx + 1 :], start=header_idx + 2):
+        if row is None or _row_is_empty(row):
             continue
         ext = _cell(row, hm, "id товара", "id")
         ptype = _cell(row, hm, "тип акции", "тип")
         disc = _float_cell(row, hm, "размер скидки", "скидка", "скидка %")
         d1s = _cell(row, hm, "дата начала", "начало")
         d2s = _cell(row, hm, "дата окончания", "окончание", "конец")
+        bonus_raw = _cell(
+            row,
+            hm,
+            "id товаров-бонусов (через запятую)",
+            "id товаров бонуса",
+            "id товаров-бонусов",
+            "бонусные id",
+            "id бонусных товаров",
+            "id бонусов",
+            "товары бонусом",
+        )
         if not ext:
             rep.errors.append(f"Акции, строка {line_no}: нет ID товара.")
             continue
@@ -288,6 +412,15 @@ def import_promotions(conn: sqlite3.Connection, path: Path) -> ImportReport:
         if not pr:
             rep.errors.append(f"Акции, строка {line_no}: товар с ID «{ext}» не найден в базе.")
             continue
+        parsed_bonus = parse_product_external_ids_csv(bonus_raw)
+        bonus_norm = normalize_product_external_ids_csv(bonus_raw)
+        if parsed_bonus:
+            miss = missing_product_external_ids(conn, parsed_bonus)
+            if miss:
+                rep.errors.append(
+                    f"Акции, строка {line_no}: не найдены товары с ID (бонус): {', '.join(miss)}."
+                )
+                continue
         try:
             promotions.upsert(
                 conn,
@@ -296,6 +429,8 @@ def import_promotions(conn: sqlite3.Connection, path: Path) -> ImportReport:
                 discount_percent=float(disc),
                 valid_from_iso=iso(d1),
                 valid_to_iso=iso(d2),
+                bonus_other_product_ids=bonus_norm,
+                matrix_rules_json=_extract_matrix_rules_json(row, header_row, hm),
             )
             rep.promotions_rows += 1
         except Exception as e:  # noqa: BLE001
@@ -399,7 +534,14 @@ def export_promotions(conn: sqlite3.Connection, path: Path) -> None:
     ws = wb.active
     ws.title = "promotions"
     ws.append(
-        ["ID товара", "Тип акции", "Размер скидки", "Дата начала", "Дата окончания"]
+        [
+            "ID товара",
+            "Тип акции",
+            "Размер скидки",
+            "Дата начала",
+            "Дата окончания",
+            "ID товаров-бонусов (через запятую)",
+        ]
     )
     for r in promotions.list_all(conn):
         d1 = parse_iso(r.valid_from_iso) if r.valid_from_iso else None
@@ -411,6 +553,7 @@ def export_promotions(conn: sqlite3.Connection, path: Path) -> None:
                 r.discount_percent,
                 format_dmY(d1) if d1 else "",
                 format_dmY(d2) if d2 else "",
+                r.bonus_other_product_ids or "",
             ]
         )
     path = Path(path)

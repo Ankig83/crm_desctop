@@ -20,6 +20,11 @@ from PySide6.QtWidgets import (
 )
 
 from crm_desktop.repositories import audit, products, promotions
+from crm_desktop.utils.bonus_ids import (
+    missing_product_external_ids,
+    normalize_product_external_ids_csv,
+    parse_product_external_ids_csv,
+)
 from crm_desktop.utils.dates import format_dmY, iso, parse_dmY, parse_iso
 
 
@@ -38,6 +43,12 @@ class PromotionsTab(QWidget):
         self._ptype.setPlaceholderText("Тип акции (по ТЗ)")
         self._disc = QLineEdit()
         self._disc.setPlaceholderText("Процент, например 10")
+        self._bonus_ids = QLineEdit()
+        self._bonus_ids.setPlaceholderText("Например: 4,5,12 — внешние ID товаров из каталога")
+        self._bonus_ids.setToolTip(
+            "Товары, которые клиент может получить бонусом по акции «другой товар». "
+            "Те же ID, что в колонке «ID товара» в Excel товаров. Через запятую; можно с префиксом «id -»."
+        )
         self._d1 = QDateEdit()
         self._d2 = QDateEdit()
         for d in (self._d1, self._d2):
@@ -56,6 +67,7 @@ class PromotionsTab(QWidget):
         form.addRow("Товар:", self._product)
         form.addRow("Тип акции:", self._ptype)
         form.addRow("Скидка %:", self._disc)
+        form.addRow("ID товаров-бонусов:", self._bonus_ids)
         form.addRow("Дата начала:", self._d1)
         form.addRow("Дата окончания:", self._d2)
         btns = QHBoxLayout()
@@ -124,6 +136,7 @@ class PromotionsTab(QWidget):
         if pr:
             self._ptype.setText(pr.promo_type)
             self._disc.setText(str(pr.discount_percent))
+            self._bonus_ids.setText(pr.bonus_other_product_ids.replace(",", ", "))
             d1 = parse_iso(pr.valid_from_iso)
             d2 = parse_iso(pr.valid_to_iso)
             self._d1.setDate(QDate(d1.year, d1.month, d1.day))
@@ -131,6 +144,7 @@ class PromotionsTab(QWidget):
         else:
             self._ptype.clear()
             self._disc.clear()
+            self._bonus_ids.clear()
             self._d1.setDate(QDate.currentDate())
             self._d2.setDate(QDate.currentDate())
         self._loading = False
@@ -154,6 +168,18 @@ class PromotionsTab(QWidget):
         if d1 > d2:
             QMessageBox.warning(self, "Период", "Дата начала не может быть позже окончания.")
             return
+        bonus_norm = normalize_product_external_ids_csv(self._bonus_ids.text())
+        parsed_bonus = parse_product_external_ids_csv(self._bonus_ids.text())
+        if parsed_bonus:
+            miss = missing_product_external_ids(self._conn, parsed_bonus)
+            if miss:
+                QMessageBox.warning(
+                    self,
+                    "Бонусные товары",
+                    "Нет товаров с такими внешними ID в каталоге:\n" + ", ".join(miss),
+                )
+                return
+        existing = promotions.get_for_product(self._conn, product_id)
         promotions.upsert(
             self._conn,
             product_id,
@@ -161,6 +187,8 @@ class PromotionsTab(QWidget):
             discount_percent=disc,
             valid_from_iso=iso(d1),
             valid_to_iso=iso(d2),
+            bonus_other_product_ids=bonus_norm,
+            matrix_rules_json=existing.matrix_rules_json if existing else "",
         )
         audit.log(self._conn, "upsert", "promotion", str(product_id))
         self._reload_list_only()
@@ -191,6 +219,7 @@ class PromotionsTab(QWidget):
             self._product.setCurrentIndex(0)
         self._ptype.clear()
         self._disc.clear()
+        self._bonus_ids.clear()
         self._d1.setDate(QDate.currentDate())
         self._d2.setDate(QDate.currentDate())
         self._loading = False

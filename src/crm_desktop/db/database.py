@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 5
 
 DDL = """
 PRAGMA foreign_keys = ON;
@@ -57,7 +57,30 @@ CREATE TABLE IF NOT EXISTS promotions (
   discount_percent REAL NOT NULL DEFAULT 0,
   valid_from TEXT NOT NULL,
   valid_to TEXT NOT NULL,
+  bonus_other_product_ids TEXT NOT NULL DEFAULT '',
+  matrix_rules_json TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS calculation_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at TEXT NOT NULL,
+  quote_date TEXT NOT NULL,
+  client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL,
+  total REAL NOT NULL DEFAULT 0,
+  details_json TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS calculation_session_lines (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL REFERENCES calculation_sessions(id) ON DELETE CASCADE,
+  product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+  product_external_id TEXT NOT NULL DEFAULT '',
+  product_name TEXT NOT NULL DEFAULT '',
+  qty REAL NOT NULL DEFAULT 0,
+  base_price REAL NOT NULL DEFAULT 0,
+  discount_percent REAL NOT NULL DEFAULT 0,
+  line_total REAL NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -92,6 +115,9 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(DDL)
     _migrate_v2(conn)
+    _migrate_v3(conn)
+    _migrate_v4(conn)
+    _migrate_v5(conn)
     row = conn.execute(
         "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
     ).fetchone()
@@ -152,3 +178,48 @@ def _migrate_v2(conn: sqlite3.Connection) -> None:
     )
     _add_column_if_missing(conn, "products", "gross_weight_kg REAL NOT NULL DEFAULT 0", "gross_weight_kg")
     _add_column_if_missing(conn, "products", "volume_m3 REAL NOT NULL DEFAULT 0", "volume_m3")
+
+
+def _migrate_v3(conn: sqlite3.Connection) -> None:
+    _add_column_if_missing(
+        conn,
+        "promotions",
+        "bonus_other_product_ids TEXT NOT NULL DEFAULT ''",
+        "bonus_other_product_ids",
+    )
+
+
+def _migrate_v4(conn: sqlite3.Connection) -> None:
+    _add_column_if_missing(
+        conn,
+        "promotions",
+        "matrix_rules_json TEXT NOT NULL DEFAULT ''",
+        "matrix_rules_json",
+    )
+
+
+def _migrate_v5(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS calculation_sessions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          created_at TEXT NOT NULL,
+          quote_date TEXT NOT NULL,
+          client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL,
+          total REAL NOT NULL DEFAULT 0,
+          details_json TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS calculation_session_lines (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id INTEGER NOT NULL REFERENCES calculation_sessions(id) ON DELETE CASCADE,
+          product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+          product_external_id TEXT NOT NULL DEFAULT '',
+          product_name TEXT NOT NULL DEFAULT '',
+          qty REAL NOT NULL DEFAULT 0,
+          base_price REAL NOT NULL DEFAULT 0,
+          discount_percent REAL NOT NULL DEFAULT 0,
+          line_total REAL NOT NULL DEFAULT 0
+        );
+        """
+    )
