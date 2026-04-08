@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6  # ← было 5
 
 DDL = """
 PRAGMA foreign_keys = ON;
@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS clients (
   consignee_phone TEXT NOT NULL DEFAULT '',
   consignee_email TEXT NOT NULL DEFAULT '',
   is_new INTEGER NOT NULL DEFAULT 0,
+  client_type TEXT NOT NULL DEFAULT 'regular',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -118,6 +119,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     _migrate_v3(conn)
     _migrate_v4(conn)
     _migrate_v5(conn)
+    _migrate_v6(conn)  # ← новая
     row = conn.execute(
         "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
     ).fetchone()
@@ -133,57 +135,44 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(r[1]) for r in rows}
 
 
-def _add_column_if_missing(conn: sqlite3.Connection, table: str, column_sql: str, col_name: str) -> None:
+def _add_column_if_missing(
+    conn: sqlite3.Connection, table: str, column_sql: str, col_name: str
+) -> None:
     cols = _table_columns(conn, table)
     if col_name not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_sql}")
 
 
 def _migrate_v2(conn: sqlite3.Connection) -> None:
-    # clients
     _add_column_if_missing(conn, "clients", "contact_person TEXT NOT NULL DEFAULT ''", "contact_person")
     _add_column_if_missing(conn, "clients", "email TEXT NOT NULL DEFAULT ''", "email")
     _add_column_if_missing(conn, "clients", "city_region_zip TEXT NOT NULL DEFAULT ''", "city_region_zip")
     _add_column_if_missing(conn, "clients", "consignee_name TEXT NOT NULL DEFAULT ''", "consignee_name")
     _add_column_if_missing(
-        conn,
-        "clients",
+        conn, "clients",
         "consignee_contact_person TEXT NOT NULL DEFAULT ''",
         "consignee_contact_person",
     )
     _add_column_if_missing(conn, "clients", "consignee_address TEXT NOT NULL DEFAULT ''", "consignee_address")
     _add_column_if_missing(
-        conn,
-        "clients",
+        conn, "clients",
         "consignee_city_region_zip TEXT NOT NULL DEFAULT ''",
         "consignee_city_region_zip",
     )
     _add_column_if_missing(conn, "clients", "consignee_phone TEXT NOT NULL DEFAULT ''", "consignee_phone")
     _add_column_if_missing(conn, "clients", "consignee_email TEXT NOT NULL DEFAULT ''", "consignee_email")
-    # products
     _add_column_if_missing(conn, "products", "box_barcode TEXT NOT NULL DEFAULT ''", "box_barcode")
     _add_column_if_missing(conn, "products", "unit TEXT NOT NULL DEFAULT 'кор'", "unit")
     _add_column_if_missing(conn, "products", "units_per_box INTEGER NOT NULL DEFAULT 0", "units_per_box")
-    _add_column_if_missing(
-        conn,
-        "products",
-        "regular_piece_price REAL NOT NULL DEFAULT 0",
-        "regular_piece_price",
-    )
-    _add_column_if_missing(
-        conn,
-        "products",
-        "boxes_per_pallet REAL NOT NULL DEFAULT 0",
-        "boxes_per_pallet",
-    )
+    _add_column_if_missing(conn, "products", "regular_piece_price REAL NOT NULL DEFAULT 0", "regular_piece_price")
+    _add_column_if_missing(conn, "products", "boxes_per_pallet REAL NOT NULL DEFAULT 0", "boxes_per_pallet")
     _add_column_if_missing(conn, "products", "gross_weight_kg REAL NOT NULL DEFAULT 0", "gross_weight_kg")
     _add_column_if_missing(conn, "products", "volume_m3 REAL NOT NULL DEFAULT 0", "volume_m3")
 
 
 def _migrate_v3(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(
-        conn,
-        "promotions",
+        conn, "promotions",
         "bonus_other_product_ids TEXT NOT NULL DEFAULT ''",
         "bonus_other_product_ids",
     )
@@ -191,8 +180,7 @@ def _migrate_v3(conn: sqlite3.Connection) -> None:
 
 def _migrate_v4(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(
-        conn,
-        "promotions",
+        conn, "promotions",
         "matrix_rules_json TEXT NOT NULL DEFAULT ''",
         "matrix_rules_json",
     )
@@ -222,4 +210,13 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
           line_total REAL NOT NULL DEFAULT 0
         );
         """
+    )
+
+
+def _migrate_v6(conn: sqlite3.Connection) -> None:
+    """Добавляет тип клиента: retail_chain / distributor / wholesaler / regular."""
+    _add_column_if_missing(
+        conn, "clients",
+        "client_type TEXT NOT NULL DEFAULT 'regular'",
+        "client_type",
     )

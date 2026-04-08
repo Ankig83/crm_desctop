@@ -35,7 +35,10 @@ class QuoteTab(QWidget):
         super().__init__(parent)
         self._conn = conn
         self._block = False
+
         self._client = QComboBox()
+        self._client.currentIndexChanged.connect(lambda *_: self._recalc())  # ← пересчёт при смене клиента
+
         self._date = QDateEdit()
         self._date.setCalendarPopup(True)
         self._date.setDisplayFormat("dd.MM.yyyy")
@@ -50,33 +53,40 @@ class QuoteTab(QWidget):
 
         self._total = QLabel("0.00")
 
-        btn_line = QPushButton("Строка")
+        # ── Метка скидки клиента ──────────────────────────────
+        self._client_discount_label = QLabel("")
+        self._client_discount_label.setStyleSheet("color: #1a6b1a; font-style: italic;")
+
+        btn_line        = QPushButton("Строка")
+        btn_del         = QPushButton("Удалить строку")
+        btn_calc        = QPushButton("Пересчитать")
+        btn_export      = QPushButton("Сохранить расчёт (TXT)…")
+        btn_export_pdf  = QPushButton("Сохранить расчёт (PDF)…")
+        btn_export_rus  = QPushButton("Сформировать RUS.xlsx…")
+        btn_save_session= QPushButton("Сохранить в историю")
+        btn_mail        = QPushButton("Отправить на e-mail…")
+
         btn_line.clicked.connect(self._add_line)
-        btn_del = QPushButton("Удалить строку")
         btn_del.clicked.connect(self._del_line)
-        btn_calc = QPushButton("Пересчитать")
         btn_calc.clicked.connect(self._recalc)
-        btn_export = QPushButton("Сохранить расчёт (TXT)…")
         btn_export.clicked.connect(self._export_txt)
-        btn_export_pdf = QPushButton("Сохранить расчёт (PDF)…")
         btn_export_pdf.clicked.connect(self._export_pdf)
-        btn_export_rus = QPushButton("Сформировать RUS.xlsx…")
         btn_export_rus.clicked.connect(self._export_rus)
-        btn_save_session = QPushButton("Сохранить в историю")
         btn_save_session.clicked.connect(self._save_session_action)
-        btn_mail = QPushButton("Отправить на e-mail…")
         btn_mail.clicked.connect(self._send_mail)
 
         row = QHBoxLayout()
-        for b in (btn_line, btn_del, btn_calc, btn_export, btn_export_pdf, btn_export_rus, btn_save_session, btn_mail):
+        for b in (btn_line, btn_del, btn_calc, btn_export, btn_export_pdf,
+                  btn_export_rus, btn_save_session, btn_mail):
             row.addWidget(b)
         row.addStretch()
 
         grid = QGridLayout()
         grid.addWidget(QLabel("Клиент:"), 0, 0)
         grid.addWidget(self._client, 0, 1)
-        grid.addWidget(QLabel("Дата расчёта:"), 0, 2)
-        grid.addWidget(self._date, 0, 3)
+        grid.addWidget(self._client_discount_label, 0, 2)   # ← скидка клиента рядом
+        grid.addWidget(QLabel("Дата расчёта:"), 0, 3)
+        grid.addWidget(self._date, 0, 4)
 
         lay = QVBoxLayout(self)
         lay.addLayout(grid)
@@ -84,13 +94,37 @@ class QuoteTab(QWidget):
         lay.addWidget(self._table)
         lay.addWidget(QLabel("Итого:"))
         lay.addWidget(self._total)
+
         self.reload_clients()
         self._add_line()
+
+    # ── Получение текущего клиента и его скидки ───────────────
+
+    def _current_client(self) -> clients.Client | None:
+        cid = self._client.currentData()
+        return clients.get(self._conn, int(cid)) if cid is not None else None
+
+    def _client_type_pct(self) -> float:
+        c = self._current_client()
+        return c.type_discount_pct if c else 0.0
+
+    # ── Список клиентов ───────────────────────────────────────
 
     def reload_clients(self) -> None:
         self._client.clear()
         for c in clients.list_all(self._conn):
-            self._client.addItem(f"{c.name} (ИНН {c.inn or '—'})", c.id)
+            label = f"{c.name} [{c.client_type_label}] (ИНН {c.inn or '—'})"
+            self._client.addItem(label, c.id)
+        self._update_client_discount_label()
+
+    def _update_client_discount_label(self) -> None:
+        pct = self._client_type_pct()
+        if pct > 0:
+            self._client_discount_label.setText(f"Скидка клиента: −{pct:.0f}%")
+        else:
+            self._client_discount_label.setText("")
+
+    # ── Строки таблицы ────────────────────────────────────────
 
     def _add_line(self) -> None:
         self._block = True
@@ -140,10 +174,15 @@ class QuoteTab(QWidget):
         q = self._date.date()
         return parse_dmY(f"{q.day():02d}.{q.month():02d}.{q.year():04d}")
 
+    # ── Пересчёт ─────────────────────────────────────────────
+
     def _recalc(self) -> None:
         self._block = True
+        self._update_client_discount_label()
         qd = self._quote_date()
+        client_pct = self._client_type_pct()
         total = 0.0
+
         for r in range(self._table.rowCount()):
             w = self._table.cellWidget(r, 1)
             if not isinstance(w, QComboBox):
@@ -160,31 +199,43 @@ class QuoteTab(QWidget):
             except ValueError:
                 qty = 0.0
             promo = promotions.get_for_product(self._conn, p.id)
-            vf = parse_iso(promo.valid_from_iso) if promo else None
-            vt = parse_iso(promo.valid_to_iso) if promo else None
-            disc = promo.discount_percent if promo else 0.0
-            sub = line_total(p.base_price, qty, disc, qd, vf, vt)
+            vf   = parse_iso(promo.valid_from_iso) if promo else None
+            vt   = parse_iso(promo.valid_to_iso)   if promo else None
+            disc = promo.discount_percent           if promo else 0.0
+
+            sub = line_total(
+                p.base_price, qty, disc, qd, vf, vt,
+                client_type_pct=client_pct,   # ← скидка по типу клиента
+            )
             total += sub
+
             sum_it = self._table.item(r, 4)
             if sum_it:
                 sum_it.setText(f"{sub:.2f}")
             pr_it = self._table.item(r, 2)
             if pr_it:
                 pr_it.setText(str(p.base_price))
+
         self._total.setText(f"{total:.2f}")
         self._block = False
+
+    # ── Текстовый расчёт ──────────────────────────────────────
 
     def _build_text(self) -> str:
         lines: list[str] = []
         q = self._date.date()
         lines.append(f"Дата расчёта: {q.day():02d}.{q.month():02d}.{q.year():04d}")
-        cid = self._client.currentData()
-        c = clients.get(self._conn, int(cid)) if cid is not None else None
+        c = self._current_client()
         lines.append(f"Клиент: {c.name if c else '—'}")
         lines.append(f"ИНН: {c.inn if c else '—'}")
+        if c and c.type_discount_pct > 0:
+            lines.append(f"Скидка клиента ({c.client_type_label}): −{c.type_discount_pct:.0f}%")
         lines.append("")
+
         qd = self._quote_date()
+        client_pct = self._client_type_pct()
         grand = 0.0
+
         for r in range(self._table.rowCount()):
             w = self._table.cellWidget(r, 1)
             if not isinstance(w, QComboBox):
@@ -200,20 +251,29 @@ class QuoteTab(QWidget):
             except ValueError:
                 qty = 0.0
             promo = promotions.get_for_product(self._conn, p.id)
-            vf = parse_iso(promo.valid_from_iso) if promo else None
-            vt = parse_iso(promo.valid_to_iso) if promo else None
-            disc = promo.discount_percent if promo else 0.0
-            sub = line_total(p.base_price, qty, disc, qd, vf, vt)
+            vf   = parse_iso(promo.valid_from_iso) if promo else None
+            vt   = parse_iso(promo.valid_to_iso)   if promo else None
+            disc = promo.discount_percent           if promo else 0.0
+
+            sub = line_total(
+                p.base_price, qty, disc, qd, vf, vt,
+                client_type_pct=client_pct,
+            )
             grand += sub
             lines.append(f"{p.name} × {qty} = {sub:.2f}")
+
         lines.append("")
         lines.append(f"Итого: {grand:.2f}")
         return "\n".join(lines)
 
+    # ── Payload для сохранения сессии ─────────────────────────
+
     def _session_payload(self) -> tuple[float, list[calculation_sessions.SessionLine]]:
         qd = self._quote_date()
+        client_pct = self._client_type_pct()
         total = 0.0
         payload: list[calculation_sessions.SessionLine] = []
+
         for r in range(self._table.rowCount()):
             w = self._table.cellWidget(r, 1)
             if not isinstance(w, QComboBox):
@@ -229,11 +289,15 @@ class QuoteTab(QWidget):
             except ValueError:
                 qty = 0.0
             promo = promotions.get_for_product(self._conn, p.id)
-            vf = parse_iso(promo.valid_from_iso) if promo else None
-            vt = parse_iso(promo.valid_to_iso) if promo else None
-            disc = promo.discount_percent if promo else 0.0
+            vf   = parse_iso(promo.valid_from_iso) if promo else None
+            vt   = parse_iso(promo.valid_to_iso)   if promo else None
+            disc = promo.discount_percent           if promo else 0.0
+
             applied_disc = disc if (vf and vt and vf <= qd <= vt and disc > 0) else 0.0
-            sub = line_total(p.base_price, qty, disc, qd, vf, vt)
+            sub = line_total(
+                p.base_price, qty, disc, qd, vf, vt,
+                client_type_pct=client_pct,
+            )
             total += sub
             payload.append(
                 calculation_sessions.SessionLine(
@@ -242,7 +306,7 @@ class QuoteTab(QWidget):
                     product_name=p.name,
                     qty=qty,
                     base_price=p.base_price,
-                    discount_percent=applied_disc,
+                    discount_percent=applied_disc + client_pct,  # суммарная скидка в истории
                     line_total=sub,
                 )
             )
@@ -270,9 +334,13 @@ class QuoteTab(QWidget):
         if sid is not None:
             QMessageBox.information(self, "История расчётов", f"Сессия сохранена: #{sid}")
 
+    # ── Сбор строк для RUS.xlsx ───────────────────────────────
+
     def _collect_rus_lines(self) -> list[RusLine]:
         qd = self._quote_date()
+        client_pct = self._client_type_pct()
         out: list[RusLine] = []
+
         for r in range(self._table.rowCount()):
             w = self._table.cellWidget(r, 1)
             if not isinstance(w, QComboBox):
@@ -288,18 +356,27 @@ class QuoteTab(QWidget):
             except ValueError:
                 qty = 0.0
             promo = promotions.get_for_product(self._conn, p.id)
-            vf = parse_iso(promo.valid_from_iso) if promo else None
-            vt = parse_iso(promo.valid_to_iso) if promo else None
-            disc = promo.discount_percent if promo else 0.0
-            sub = line_total(p.base_price, qty, disc, qd, vf, vt)
+            vf   = parse_iso(promo.valid_from_iso) if promo else None
+            vt   = parse_iso(promo.valid_to_iso)   if promo else None
+            disc = promo.discount_percent           if promo else 0.0
+
+            promo_disc  = disc if (vf and vt and vf <= qd <= vt and disc > 0) else 0.0
+            total_disc  = min(promo_disc + client_pct, 100.0)  # суммарная скидка для экспорта
+
+            sub = line_total(
+                p.base_price, qty, disc, qd, vf, vt,
+                client_type_pct=client_pct,
+            )
+
             matrix_rules: dict[str, str | int | float] = {}
             if promo and promo.matrix_rules_json:
                 try:
-                    raw_rules = json.loads(promo.matrix_rules_json)
-                    if isinstance(raw_rules, dict):
-                        matrix_rules = {str(k): v for k, v in raw_rules.items()}
+                    raw = json.loads(promo.matrix_rules_json)
+                    if isinstance(raw, dict):
+                        matrix_rules = {str(k): v for k, v in raw.items()}
                 except Exception:  # noqa: BLE001
                     matrix_rules = {}
+
             out.append(
                 RusLine(
                     external_id=p.external_id or "",
@@ -318,12 +395,14 @@ class QuoteTab(QWidget):
                     gross_weight_kg=p.gross_weight_kg,
                     volume_m3=p.volume_m3,
                     base_price=p.base_price,
-                    discount_percent=disc if (vf and vt and vf <= qd <= vt and disc > 0) else 0.0,
+                    discount_percent=total_disc,   # ← суммарная скидка в xlsx
                     line_total=sub,
                     matrix_rules=matrix_rules,
                 )
             )
         return out
+
+    # ── Экспорт ───────────────────────────────────────────────
 
     def _export_txt(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "Сохранить", "", "Текст (*.txt)")
@@ -350,8 +429,7 @@ class QuoteTab(QWidget):
         path, _ = QFileDialog.getSaveFileName(self, "Сформировать RUS.xlsx", "RUS.xlsx", "Excel (*.xlsx)")
         if not path:
             return
-        cid = self._client.currentData()
-        client = clients.get(self._conn, int(cid)) if cid is not None else None
+        client = self._current_client()
         try:
             export_rus_variant_a(
                 Path(path),
