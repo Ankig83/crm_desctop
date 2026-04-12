@@ -105,6 +105,14 @@ def _build(onefile: bool = False) -> None:
     """Запускает PyInstaller с нужными аргументами."""
     src_path = str(ROOT / "src")
 
+    # Файл руководства пользователя — будет доступен внутри EXE
+    docs_dir = ROOT / "docs"
+    user_guide = docs_dir / "USER_GUIDE.md"
+    add_data: list[str] = []
+    if user_guide.exists():
+        sep = ";" if __import__("sys").platform == "win32" else ":"
+        add_data = ["--add-data", f"{user_guide}{sep}docs"]
+
     cmd: list[str] = [
         _python(), "-m", "PyInstaller",
         "--noconfirm",
@@ -113,6 +121,9 @@ def _build(onefile: bool = False) -> None:
         "--windowed",               # без консольного окна (GUI-приложение)
         "--paths", src_path,        # чтобы находились модули из src/
     ]
+
+    if add_data:
+        cmd += add_data
 
     if onefile:
         cmd.append("--onefile")

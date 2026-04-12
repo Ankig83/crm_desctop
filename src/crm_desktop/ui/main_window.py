@@ -198,12 +198,18 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _show_user_guide(self) -> None:
-        guide_path = Path(__file__).resolve().parents[4] / "docs" / "USER_GUIDE.md"
-        if not guide_path.exists():
-            # Fallback: ищем рядом с EXE
-            import sys
-            guide_path = Path(sys.executable).parent / "docs" / "USER_GUIDE.md"
-        if not guide_path.exists():
+        import sys
+        # Порядок поиска файла:
+        # 1. Внутри PyInstaller-бандла (--add-data встроил файл в EXE)
+        # 2. Рядом с EXE в папке docs/ (onedir-режим или ручная раскладка)
+        # 3. Папка проекта при запуске из исходников
+        candidates = [
+            Path(getattr(sys, "_MEIPASS", "")) / "docs" / "USER_GUIDE.md",
+            Path(sys.executable).parent / "docs" / "USER_GUIDE.md",
+            Path(__file__).resolve().parents[4] / "docs" / "USER_GUIDE.md",
+        ]
+        guide_path = next((p for p in candidates if p.exists()), None)
+        if guide_path is None:
             QMessageBox.information(
                 self, "Справка",
                 "Файл руководства не найден.\n"
