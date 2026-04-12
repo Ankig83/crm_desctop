@@ -9,6 +9,7 @@ r"""
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -90,10 +91,24 @@ def _ensure_pyinstaller() -> None:
 
 def _clean() -> None:
     """Удаляет старые артефакты сборки."""
+    import stat, time
+
+    def _on_error(func, path, exc_info):
+        """Снимаем readonly и пробуем ещё раз (для заблокированных .pyd/.dll)."""
+        try:
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        except Exception:
+            time.sleep(0.3)
+            try:
+                func(path)
+            except Exception:
+                print(f"[build] Предупреждение: не удалось удалить {path} — пропускаю.")
+
     for folder in ("build", "dist"):
         p = ROOT / folder
         if p.exists():
-            shutil.rmtree(p)
+            shutil.rmtree(p, onexc=_on_error)
             print(f"[build] Удалена папка: {folder}/")
     spec_file = ROOT / f"{APP_NAME}.spec"
     if spec_file.exists():
