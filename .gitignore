@@ -25,3 +25,13 @@ Thumbs.db
 
 # Локальные копии БД при отладке в корне проекта (если появятся)
 *.db
+
+# Тестовые и сгенерированные Excel-файлы в корне проекта
+RUS*.xlsx
+clients*.xlsx
+products*.xlsx
+promotions*.xlsx
+
+# Временные файлы анализа
+tmp_*.txt
+_version_info.txt

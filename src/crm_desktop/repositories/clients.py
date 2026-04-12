@@ -11,7 +11,7 @@ from crm_desktop.repositories._util import ts_now
 
 CLIENT_TYPES: dict[str, str] = {
     "retail_chain": "Торговая сеть",
-    "distributor":  "Дистрибутор",
+    "distributor":  "Дистрибьютор",
     "wholesaler":   "Оптовик",
     "regular":      "Обычный клиент",
 }

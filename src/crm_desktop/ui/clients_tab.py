@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from PySide6.QtGui import QColor
 
 from crm_desktop.repositories import audit, clients
 from crm_desktop.repositories.clients import CLIENT_TYPES, CLIENT_TYPE_DISCOUNT
@@ -34,6 +35,12 @@ class ClientsTab(QWidget):
         self._conn = conn
         self._current_id: int | None = None
         self._loading = False
+
+        # ── Поиск по списку клиентов ─────────────────────────
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("🔍  Поиск по названию, ИНН…")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._apply_filter)
 
         # ── Список клиентов (левая панель) ───────────────────
         self._list = QListWidget()
@@ -221,8 +228,15 @@ class ClientsTab(QWidget):
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setWidget(form_root)
 
+        left_panel = QWidget()
+        left_lay = QVBoxLayout(left_panel)
+        left_lay.setContentsMargins(0, 0, 0, 0)
+        left_lay.setSpacing(4)
+        left_lay.addWidget(self._search)
+        left_lay.addWidget(self._list)
+
         split = QSplitter()
-        split.addWidget(self._list)
+        split.addWidget(left_panel)
         split.addWidget(scroll)
         split.setStretchFactor(1, 1)
 
@@ -247,8 +261,28 @@ class ClientsTab(QWidget):
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, c.id)
             self._list.addItem(item)
+        self._apply_filter()
         if self._list.count() and self._current_id is None:
-            self._list.setCurrentRow(0)
+            # выбираем первый видимый элемент
+            for i in range(self._list.count()):
+                if not self._list.item(i).isHidden():
+                    self._list.setCurrentRow(i)
+                    break
+
+    def _apply_filter(self) -> None:
+        """Скрывает строки, не совпадающие с текстом поиска."""
+        q = self._search.text().strip().lower()
+        first_visible: int | None = None
+        for i in range(self._list.count()):
+            it = self._list.item(i)
+            if not it:
+                continue
+            if q == "" or q in it.text().lower():
+                it.setHidden(False)
+                if first_visible is None:
+                    first_visible = i
+            else:
+                it.setHidden(True)
 
     # ── Загрузка данных в форму ───────────────────────────────
     def _load_form(self, c: clients.Client) -> None:

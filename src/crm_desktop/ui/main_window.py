@@ -3,8 +3,20 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QFileDialog, QMainWindow, QMessageBox, QTabWidget
+from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QScrollArea,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from crm_desktop.adapters import excel_io
 from crm_desktop.repositories import audit
@@ -100,6 +112,20 @@ class MainWindow(QMainWindow):
         a_exit.triggered.connect(self.close)
         m_file.addAction(a_exit)
 
+        # ── Меню «Справка» ───────────────────────────────────
+        m_help = bar.addMenu("Справка")
+
+        a_guide = QAction("Руководство пользователя", self)
+        a_guide.setShortcut("F1")
+        a_guide.triggered.connect(self._show_user_guide)
+        m_help.addAction(a_guide)
+
+        m_help.addSeparator()
+
+        a_about = QAction("О программе", self)
+        a_about.triggered.connect(self._show_about)
+        m_help.addAction(a_about)
+
     def _imp_clients(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Клиенты", "", "Excel (*.xlsx)")
         if not path:
@@ -171,9 +197,164 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self._conn, self)
         dlg.exec()
 
+    def _show_user_guide(self) -> None:
+        guide_path = Path(__file__).resolve().parents[4] / "docs" / "USER_GUIDE.md"
+        if not guide_path.exists():
+            # Fallback: ищем рядом с EXE
+            import sys
+            guide_path = Path(sys.executable).parent / "docs" / "USER_GUIDE.md"
+        if not guide_path.exists():
+            QMessageBox.information(
+                self, "Справка",
+                "Файл руководства не найден.\n"
+                "Ожидается: docs/USER_GUIDE.md рядом с программой."
+            )
+            return
+        try:
+            text = guide_path.read_text(encoding="utf-8")
+        except OSError as e:
+            QMessageBox.warning(self, "Справка", f"Не удалось открыть файл:\n{e}")
+            return
+        _GuideDialog(text, self).exec()
+
+    def _show_about(self) -> None:
+        QMessageBox.about(
+            self,
+            "О программе",
+            "<b>CRM Desktop</b><br>"
+            "Версия 1.0<br><br>"
+            "Программа для учёта клиентов и товаров,<br>"
+            "расчёта заказов и выгрузки в 1С (RUS.xlsx).<br><br>"
+            "По вопросам: PyBotStudio",
+        )
+
     def closeEvent(self, event) -> None:  # noqa: N802
         try:
             self._conn.close()
         except Exception:  # noqa: BLE001
             pass
         event.accept()
+
+
+class _GuideDialog(QDialog):
+    """Диалог с прокручиваемым текстом руководства пользователя."""
+
+    def __init__(self, markdown_text: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Руководство пользователя")
+        self.resize(820, 620)
+
+        # Конвертируем Markdown в простой читаемый HTML
+        html = _md_to_simple_html(markdown_text)
+
+        label = QLabel()
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setText(html)
+        label.setWordWrap(True)
+        label.setOpenExternalLinks(False)
+        label.setContentsMargins(12, 8, 12, 8)
+
+        scroll = QScrollArea()
+        scroll.setWidget(label)
+        scroll.setWidgetResizable(True)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        btns.rejected.connect(self.reject)
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(scroll)
+        lay.addWidget(btns)
+
+
+def _md_to_simple_html(md: str) -> str:
+    """Минимальный конвертер Markdown → HTML для отображения в QLabel."""
+    import html as _html
+    lines = md.split("\n")
+    result: list[str] = []
+    in_table = False
+    in_code = False
+
+    for line in lines:
+        # Блок кода
+        if line.startswith("```"):
+            if in_code:
+                result.append("</pre>")
+                in_code = False
+            else:
+                result.append("<pre style='background:#f5f5f5;padding:8px;"
+                              "border-radius:4px;font-family:Consolas,monospace;"
+                              "font-size:12px;'>")
+                in_code = True
+            continue
+        if in_code:
+            result.append(_html.escape(line))
+            continue
+
+        # Разделитель таблицы (строка из |---|)
+        if line.strip().startswith("|") and set(line.replace("|", "").replace(" ", "")) <= set("-:"):
+            continue
+
+        # Строка таблицы
+        if line.strip().startswith("|") and line.strip().endswith("|"):
+            cells = [c.strip() for c in line.strip()[1:-1].split("|")]
+            if not in_table:
+                result.append("<table border='1' cellpadding='5' cellspacing='0' "
+                              "style='border-collapse:collapse;margin:8px 0;"
+                              "font-size:13px;'>")
+                in_table = True
+                # первая строка = заголовок
+                result.append("<tr style='background:#D9E1F2;'>" +
+                               "".join(f"<th>{_html.escape(c)}</th>" for c in cells) +
+                               "</tr>")
+            else:
+                result.append("<tr>" +
+                               "".join(f"<td>{_html.escape(c)}</td>" for c in cells) +
+                               "</tr>")
+            continue
+        else:
+            if in_table:
+                result.append("</table>")
+                in_table = False
+
+        # Горизонтальная линия
+        if line.strip() in ("---", "***", "___"):
+            result.append("<hr/>")
+            continue
+
+        escaped = _html.escape(line)
+        # Inline code
+        import re
+        escaped = re.sub(r"`([^`]+)`",
+                         r"<code style='background:#f0f0f0;padding:1px 4px;"
+                         r"border-radius:3px;font-family:Consolas;'>\1</code>",
+                         escaped)
+        # Bold
+        escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
+        # Italic
+        escaped = re.sub(r"\*(.+?)\*", r"<i>\1</i>", escaped)
+
+        # Заголовки
+        if escaped.startswith("### "):
+            result.append(f"<h3 style='margin:10px 0 4px;color:#1F3864;'>{escaped[4:]}</h3>")
+        elif escaped.startswith("## "):
+            result.append(f"<h2 style='margin:14px 0 6px;color:#1F3864;"
+                          f"border-bottom:2px solid #BDD7EE;padding-bottom:4px;'>{escaped[3:]}</h2>")
+        elif escaped.startswith("# "):
+            result.append(f"<h1 style='color:#1F3864;'>{escaped[2:]}</h1>")
+        elif escaped.startswith("&gt; "):
+            result.append(f"<blockquote style='border-left:4px solid #BDD7EE;"
+                          f"margin:4px 0;padding:4px 12px;background:#EBF5FB;"
+                          f"color:#555;'>{escaped[5:]}</blockquote>")
+        elif escaped.startswith("- ") or escaped.startswith("* "):
+            result.append(f"<li style='margin:2px 0;'>{escaped[2:]}</li>")
+        elif escaped.strip() == "":
+            result.append("<br/>")
+        else:
+            result.append(f"<p style='margin:3px 0;'>{escaped}</p>")
+
+    if in_table:
+        result.append("</table>")
+    if in_code:
+        result.append("</pre>")
+
+    return "".join(result)

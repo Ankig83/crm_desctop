@@ -12,7 +12,7 @@
 
 ## Источник требований
 
-Полный разбор ТЗ, архитектура и поэтапный план: `docs/TZ_ANALYSIS_AND_IMPLEMENTATION_PLAN.md`.
+Полный разбор ТЗ, архитектура и поэтапный план: `docs/TZ_ANALYSIS_AND_IMPLEMENTATION_PLAN.md`. Актуальный **план работ и статусы задач**: `docs/WORK_PLAN.md`.
 
 ## Принятые ориентиры
 

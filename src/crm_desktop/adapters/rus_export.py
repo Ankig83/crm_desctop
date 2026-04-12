@@ -30,330 +30,127 @@ class RusLine:
     boxes_per_pallet: int = 0
     gross_weight_kg: float = 0.0
     volume_m3: float = 0.0
-    # matrix_rules может содержать произвольные ключи акций из БД,
-    # но также поддерживаются стандартные ключи шаблона:
-    #   "prepay_25"    - скидка за предоплату до 25% (%)
-    #   "prepay_50"    - скидка за предоплату до 50% (%)
-    #   "volume_300"   - скидка за объём > 300 кор (%)
-    #   "volume_500"   - скидка за объём > 500 кор (%)
-    #   "expiry_pct"   - продуктовая скидка срок годности (%)
-    #   "expiry_rub"   - продуктовая скидка (руб)
-    #   "promo_15_2_qty"  - акция 15+2 (КОФЕ): кол-во того же товара
-    #   "promo_15_2_ids"  - акция 15+2 (КОФЕ): id другого товара
-    #   "promo_10_3_qty"  - акция 10+3 (КОНФ): кол-во того же товара
-    #   "promo_10_3_ids"  - акция 10+3 (КОНФ): id другого товара
+    boxes_in_row: int = 0
+    rows_per_pallet: int = 0
+    pallet_height_mm: int = 0
+    box_dimensions: str = ""
+    is_bonus: bool = False
     matrix_rules: dict[str, Any] = field(default_factory=dict)
 
 
 # ─────────────────────────────────────────────────────────────
-# Style helpers
+# Стили
 # ─────────────────────────────────────────────────────────────
 
 FONT_NAME = "Arial"
-
-_THIN = Side(style="thin")
+_THIN   = Side(style="thin")
 _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 
-# Colour palette
-_C_BASE_DARK   = "1F4E79"   # dark blue  — row-1 group header base
-_C_BASE_LIGHT  = "BDD7EE"   # light blue — row-3 base columns
-_C_TOTAL_MID   = "2E75B6"   # mid blue   — totals group
-_C_DISC_HEAD   = "ED7D31"   # orange     — discount group header
-_C_DISC_SUB    = "FFF2CC"   # yellow     — discount sub/data
-_C_PROMO_HEAD  = "70AD47"   # green      — promo group header
-_C_PROMO_SUB   = "E2EFDA"   # light green — promo sub/data
-_C_LOG_LIGHT   = "D9D9D9"   # grey       — logistics
-_C_WHITE       = "FFFFFF"
-_C_TOTAL_DATA  = "DEEAF1"   # pale blue  — total data cells
+_C_HEADER_BG  = "1F3864"
+_C_HEADER_FG  = "FFFFFF"
+_C_LABEL_BG   = "D9E1F2"
+_C_VALUE_BG   = "FFFFFF"
+_C_TYPE_BG    = "E2EFDA"   # светло-зелёный — тип клиента (теперь в H3)
+_C_TYPE_FG    = "1F4E79"
+_C_COL_HDR    = "BDD7EE"
+_C_TOTAL_BG   = "1F4E79"
+_C_TOTAL_FG   = "FFFFFF"
+_C_DATA_ALT   = "F2F2F2"
+_C_BONUS_BG   = "FFF2CC"   # светло-жёлтый — бонусные строки
 
 
-def _font(bold: bool = False, size: int = 9, color: str = "000000") -> Font:
+def _f(bold=False, size=9, color="000000") -> Font:
     return Font(name=FONT_NAME, bold=bold, size=size, color=color)
-
 
 def _fill(rgb: str) -> PatternFill:
     return PatternFill("solid", fgColor=rgb)
 
+def _al(h="left", v="center", wrap=False) -> Alignment:
+    return Alignment(horizontal=h, vertical=v, wrap_text=wrap)
 
-def _align(h: str = "center", wrap: bool = True) -> Alignment:
-    return Alignment(horizontal=h, vertical="center", wrap_text=wrap)
-
-
-def _style(cell, bg: str, bold: bool = False, color: str = "000000",
-           h: str = "center", wrap: bool = True) -> None:
-    cell.font = _font(bold=bold, color=color)
-    cell.fill = _fill(bg)
-    cell.border = _BORDER
-    cell.alignment = _align(h=h, wrap=wrap)
-
-
-# ─────────────────────────────────────────────────────────────
-# Header builder helpers
-# ─────────────────────────────────────────────────────────────
-
-def _hdr1(ws, ref: str, value: str, bg: str) -> None:
-    """Row-1 group header (white text on dark bg)."""
-    c = ws[ref]
-    c.value = value
-    _style(c, bg, bold=True, color="FFFFFF")
-
-
-def _hdr2(ws, ref: str, value: str, bg: str, color: str = "000000") -> None:
-    """Row-2 sub-group header."""
-    c = ws[ref]
-    c.value = value
-    _style(c, bg, bold=True, color=color)
-
-
-def _hdr3(ws, ref: str, value: str, bg: str) -> None:
-    """Row-3 column label."""
-    c = ws[ref]
-    c.value = value
-    _style(c, bg, bold=True)
+def _set(cell, value=None, *, bold=False, size=9, fg="000000",
+         bg=None, h="left", wrap=False, border=False) -> None:
+    if value is not None:
+        cell.value = value
+    cell.font = _f(bold=bold, size=size, color=fg)
+    if bg:
+        cell.fill = _fill(bg)
+    cell.alignment = _al(h=h, wrap=wrap)
+    if border:
+        cell.border = _BORDER
 
 
 # ─────────────────────────────────────────────────────────────
-# CLIENT sheet builder
+# Хелперы для matrix_rules
 # ─────────────────────────────────────────────────────────────
 
-def _build_client_sheet(ws, client, quote_date: date) -> None:
-    ws.title = "CLIENT"
-
-    client_data = [
-        ("Дата",                         quote_date.strftime("%d.%m.%Y")),
-        ("Имя клиента",                  client.name if client else ""),
-        ("ИНН",                          client.inn if client else ""),
-        ("Контакт",                      client.contact_person if client else ""),
-        ("Телефон",                      client.contacts if client else ""),
-        ("Email",                        client.email if client else ""),
-        ("Адрес",                        client.addresses if client else ""),
-        ("Город/Регион",                 client.city_region_zip if client else ""),
-        ("Пункты разгрузки",             client.unload_points if client else ""),
-        ("Грузополучатель",              client.consignee_name if client else ""),
-        ("Контакт грузополучателя",      client.consignee_contact_person if client else ""),
-        ("Адрес грузополучателя",        client.consignee_address if client else ""),
-        ("Город/Регион грузополучателя", client.consignee_city_region_zip if client else ""),
-        ("Телефон грузополучателя",      client.consignee_phone if client else ""),
-        ("Email грузополучателя",        client.consignee_email if client else ""),
-    ]
-
-    ws.column_dimensions["A"].width = 32
-    ws.column_dimensions["B"].width = 50
-
-    for row_idx, (key, value) in enumerate(client_data, start=1):
-        key_cell = ws.cell(row=row_idx, column=1, value=key)
-        val_cell = ws.cell(row=row_idx, column=2, value=value)
-        key_cell.font = _font(bold=True)
-        key_cell.fill = _fill(_C_BASE_LIGHT)
-        key_cell.border = _BORDER
-        key_cell.alignment = _align(h="left")
-        val_cell.font = _font()
-        val_cell.fill = _fill(_C_WHITE)
-        val_cell.border = _BORDER
-        val_cell.alignment = _align(h="left", wrap=False)
+def _mr_prepay_disc(mr: dict) -> float:
+    """Лучшая скидка за предоплату из matrix_rules, %."""
+    best = 0.0
+    for key, val in mr.items():
+        if key.startswith("prepay_"):
+            try:
+                best = max(best, float(val or 0))
+            except (ValueError, TypeError):
+                pass
+    return best
 
 
-# ─────────────────────────────────────────────────────────────
-# ORDER sheet builder
-# ─────────────────────────────────────────────────────────────
+def _mr_volume_disc(mr: dict, threshold: int) -> float:
+    """Скидка за объём для конкретного порога (300 или 500), %."""
+    try:
+        return float(mr.get(f"volume_{threshold}") or 0)
+    except (ValueError, TypeError):
+        return 0.0
 
-def _build_order_sheet(ws, lines: list[RusLine]) -> None:
-    ws.title = "ORDER"
 
-    # ── Row 1: group headers ──────────────────────────────────
-    ws.merge_cells("A1:L1");  _hdr1(ws, "A1", "ОСНОВНЫЕ ДАННЫЕ ЗАКАЗА", _C_BASE_DARK)
-    ws.merge_cells("M1:R1");  _hdr1(ws, "M1", "СКИДКИ",                  _C_DISC_HEAD)
-    ws.merge_cells("S1:V1");  _hdr1(ws, "S1", "АКЦИОННЫЕ УСЛОВИЯ",        _C_PROMO_HEAD)
-    ws.merge_cells("W1:Y1");  _hdr1(ws, "W1", "ИТОГОВЫЕ СУММЫ",           _C_TOTAL_MID)
-    ws.merge_cells("Z1:AF1"); _hdr1(ws, "Z1", "ЛОГИСТИКА",                _C_LOG_LIGHT)
-    ws["Z1"].font = _font(bold=True, color="000000")  # grey bg → dark text
-
-    # ── Row 2: sub-group headers ──────────────────────────────
-    for col in range(1, 13):          # A–L
-        ws.cell(row=2, column=col).fill = _fill(_C_BASE_LIGHT)
-        ws.cell(row=2, column=col).border = _BORDER
-
-    ws.merge_cells("M2:N2"); _hdr2(ws, "M2", "За предоплату %",    _C_DISC_SUB)
-    ws.merge_cells("O2:P2"); _hdr2(ws, "O2", "За объём %",          _C_DISC_SUB)
-    ws.merge_cells("Q2:R2"); _hdr2(ws, "Q2", "Продуктовая скидка",  _C_DISC_SUB)
-    ws.merge_cells("S2:T2"); _hdr2(ws, "S2", "Акция 15+2 (КОФЕ)\nПри покупке 15", _C_PROMO_SUB)
-    ws.merge_cells("U2:V2"); _hdr2(ws, "U2", "Акция 10+3 (КОНФ)\nПри покупке 10", _C_PROMO_SUB)
-
-    for col in range(23, 26):         # W–Y
-        ws.cell(row=2, column=col).fill = _fill(_C_TOTAL_MID)
-        ws.cell(row=2, column=col).border = _BORDER
-
-    for col in range(26, 33):         # Z–AF
-        ws.cell(row=2, column=col).fill = _fill(_C_LOG_LIGHT)
-        ws.cell(row=2, column=col).border = _BORDER
-
-    # ── Row 3: column labels ──────────────────────────────────
-    labels = [
-        # col, label,                                   bg
-        (1,  "Артикул",                                  _C_BASE_LIGHT),
-        (2,  "Баркод коробки",                           _C_BASE_LIGHT),
-        (3,  "Наименование Товара",                      _C_BASE_LIGHT),
-        (4,  "Ед. Измерения",                            _C_BASE_LIGHT),
-        (5,  "Заказ (КОР)",                              _C_BASE_LIGHT),
-        (6,  "Кол-во в кор. (ШТ)",                       _C_BASE_LIGHT),
-        (7,  "Цена за Штуку\nрег. (РУБ)",                _C_BASE_LIGHT),
-        (8,  "Цена Короба\nрег. прайс (РУБ)",            _C_BASE_LIGHT),
-        (9,  "Кол-во на паллете\n(КОР)",                 _C_BASE_LIGHT),
-        (10, "Скидка %",                                 _C_BASE_LIGHT),
-        (11, "Цена итог (КОР)",                          _C_BASE_LIGHT),
-        (12, "Итоговая сумма\nзаказа (РУБ)",             _C_BASE_LIGHT),
-        (13, "Предоплата\nдо 25% (−2%)",                 _C_DISC_SUB),
-        (14, "Предоплата\nдо 50% (−5%)",                 _C_DISC_SUB),
-        (15, "Объём\n> 300 кор (−6%)",                   _C_DISC_SUB),
-        (16, "Объём\n> 500 кор (−8%)",                   _C_DISC_SUB),
-        (17, "Срок годности\n(%)",                       _C_DISC_SUB),
-        (18, "Скидка\n(руб)",                            _C_DISC_SUB),
-        (19, "Кол-во\nтого же товара",                   _C_PROMO_SUB),
-        (20, "id\nдругого товара",                       _C_PROMO_SUB),
-        (21, "Кол-во\nтого же товара",                   _C_PROMO_SUB),
-        (22, "id\nдругого товара",                       _C_PROMO_SUB),
-        (23, "Регулярная\nитоговая сумма (РУБ)",         _C_TOTAL_MID),
-        (24, "Итоговая сумма\n+ акция (РУБ)",            _C_TOTAL_MID),
-        (25, "Итоговая сумма\nакция + мот (РУБ)",        _C_TOTAL_MID),
-        (26, "Масса брутто\n(КГ)",                       _C_LOG_LIGHT),
-        (27, "Объём\n(м3)",                              _C_LOG_LIGHT),
-        (28, "Итого\nпаллет",                            _C_LOG_LIGHT),
-        (29, "Коробов\nв ряде",                          _C_LOG_LIGHT),  # не в RusLine — оставим пустым
-        (30, "Рядов\nв паллете",                         _C_LOG_LIGHT),  # не в RusLine — оставим пустым
-        (31, "Высота\nс паллетой (мм)",                  _C_LOG_LIGHT),  # не в RusLine — оставим пустым
-        (32, "Размер короба\nд*ш*в",                     _C_LOG_LIGHT),  # не в RusLine — оставим пустым
-    ]
-    for col_num, label, bg in labels:
-        c = ws.cell(row=3, column=col_num, value=label)
-        color = "FFFFFF" if bg in (_C_TOTAL_MID,) else "000000"
-        _style(c, bg, bold=True, color=color)
-
-    # ── Column widths ─────────────────────────────────────────
-    widths = [
-        9, 18, 38, 7, 9, 10,
-        12, 13, 11, 9, 12, 14,
-        12, 12, 13, 13, 11, 10,
-        13, 14, 13, 14,
-        16, 16, 17,
-        12, 10, 9, 10, 10, 13, 15,
-    ]
-    for i, w in enumerate(widths, start=1):
-        ws.column_dimensions[get_column_letter(i)].width = w
-
-    # ── Row heights ───────────────────────────────────────────
-    ws.row_dimensions[1].height = 22
-    ws.row_dimensions[2].height = 28
-    ws.row_dimensions[3].height = 34
-
-    # ── Data rows ─────────────────────────────────────────────
-    mr = matrix_rules = None  # alias per row
-
-    for r, line in enumerate(lines, start=4):
-        ws.row_dimensions[r].height = 16
-        mr = line.matrix_rules
-
-        # price per unit: if regular_price_per_piece is set use it,
-        # else derive from box price / units_per_box
-        price_piece = line.regular_price_per_piece or (
-            line.regular_price_per_box / line.units_per_box
-            if line.units_per_box else 0.0
-        )
-        price_box = line.regular_price_per_box or line.base_price
-
-        # Итоговая цена за короб с учётом скидки
-        price_after_disc = price_box * (1 - line.discount_percent / 100) if line.discount_percent else price_box
-
-        # Итоговая сумма строки
-        line_sum = line.qty * price_after_disc if line.qty else 0.0
-
-        # Паллеты
-        pallets = (line.qty / line.boxes_per_pallet) if line.boxes_per_pallet and line.qty else 0.0
-
-        row_values = [
-            # A–L  базовые
-            (1,  line.external_id),
-            (2,  line.box_barcode),
-            (3,  line.name),
-            (4,  line.unit),
-            (5,  line.qty if line.qty else None),
-            (6,  line.units_per_box if line.units_per_box else None),
-            (7,  round(price_piece, 4) if price_piece else None),
-            (8,  round(price_box, 4) if price_box else None),
-            (9,  line.boxes_per_pallet if line.boxes_per_pallet else None),
-            (10, line.discount_percent if line.discount_percent else None),
-            (11, round(price_after_disc, 4) if price_after_disc else None),
-            (12, round(line_sum, 2) if line_sum else None),
-            # M–R  скидки
-            (13, mr.get("prepay_25", None)),
-            (14, mr.get("prepay_50", None)),
-            (15, mr.get("volume_300", None)),
-            (16, mr.get("volume_500", None)),
-            (17, mr.get("expiry_pct", None)),
-            (18, mr.get("expiry_rub", None)),
-            # S–V  акции
-            (19, mr.get("promo_15_2_qty", None)),
-            (20, mr.get("promo_15_2_ids", None)),
-            (21, mr.get("promo_10_3_qty", None)),
-            (22, mr.get("promo_10_3_ids", None)),
-            # W–Y  итоги
-            (23, round(line.qty * price_box, 2) if line.qty and price_box else None),
-            (24, round(line_sum, 2) if line_sum else None),
-            (25, None),   # акция+мот — рассчитывается вручную / доп логикой
-            # Z–AF  логистика
-            (26, round(line.gross_weight_kg * line.qty, 3) if line.gross_weight_kg and line.qty else None),
-            (27, round(line.volume_m3 * line.qty, 4) if line.volume_m3 and line.qty else None),
-            (28, round(pallets, 2) if pallets else None),
-            (29, None),   # коробов в ряде — нет в RusLine
-            (30, None),   # рядов в паллете — нет в RusLine
-            (31, None),   # высота с паллетой — нет в RusLine
-            (32, None),   # размер короба — нет в RusLine
-        ]
-
-        for col_num, val in row_values:
-            c = ws.cell(row=r, column=col_num, value=val)
-            c.font = _font(size=9)
-            c.border = _BORDER
-
-            if col_num <= 12:
-                c.fill = _fill(_C_WHITE)
-                c.alignment = _align(h="left" if col_num == 3 else "center", wrap=False)
-            elif col_num <= 18:
-                c.fill = _fill("FFFDE7")
-                c.alignment = _align(h="center", wrap=False)
-            elif col_num <= 22:
-                c.fill = _fill("F1F8E9")
-                c.alignment = _align(h="center", wrap=False)
-            elif col_num <= 25:
-                c.fill = _fill(_C_TOTAL_DATA)
-                c.alignment = _align(h="right", wrap=False)
-                c.font = _font(size=9, bold=True)
-            else:
-                c.fill = _fill("FAFAFA")
-                c.alignment = _align(h="center", wrap=False)
-
-    # ── Legend ────────────────────────────────────────────────
-    legend_row = max(4 + len(lines), 5) + 1
-    ws.merge_cells(f"A{legend_row}:AF{legend_row}")
-    lc = ws[f"A{legend_row}"]
-    lc.value = (
-        "ЛЕГЕНДА:  "
-        "Предоплата −2% (до 25%) / −5% (до 50%)  |  "
-        "Объём −6% (> 300 кор) / −8% (> 500 кор)  |  "
-        "Продуктовая: скидка по сроку годности  |  "
-        "Акция 15+2 (КОФЕ): купи 15 кор — получи 2 бесплатно  |  "
-        "Акция 10+3 (КОНФ): купи 10 кор — получи 3 бесплатно"
+def _mr_promo_rules(mr: dict) -> list[tuple[float, int]]:
+    """[(threshold_qty, same_qty), ...] — акционные правила, сортировка по threshold."""
+    names = sorted(
+        key[len("promo_"):-len("_qty")]
+        for key in mr
+        if key.startswith("promo_") and key.endswith("_qty")
     )
-    lc.font = Font(name=FONT_NAME, size=8, italic=True, color="595959")
-    lc.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-    ws.row_dimensions[legend_row].height = 22
-
-    # ── Freeze panes ──────────────────────────────────────────
-    ws.freeze_panes = "E4"
+    rules = []
+    for name in names:
+        try:
+            threshold = float(name.split("_")[0])
+            same_qty = int(float(mr.get(f"promo_{name}_qty", 0) or 0))
+            if threshold > 0:
+                rules.append((threshold, same_qty))
+        except (ValueError, IndexError):
+            pass
+    return rules
 
 
 # ─────────────────────────────────────────────────────────────
-# Public API
+# Структура строк (СООТВЕТСТВУЕТ ШАБЛОНУ заказчика)
 # ─────────────────────────────────────────────────────────────
+# R1   No: {order_no}
+# R2   Информация о Покупателе*
+# R3   Название Компании          [H = "Тип клиента: XXX  Скидка: -N%"]
+# R4   ИНН
+# R5   Контактное Лицо
+# R6   Адрес
+# R7   Город/Штат/Почтовый Индекс
+# R8   Телефон
+# R9   Электронная почта
+# R10  Информация о Грузополучателе*
+# R11  Название Компании (груз.)
+# R12  Контактное Лицо (груз.)
+# R13  Адрес (груз.)
+# R14  Город/Штат/... (груз.)
+# R15  Телефон (груз.)
+# R16  Электронная почта (груз.)
+# R17  ДАТА ЗАКАЗА               ← критично для 1С
+# R18  ДАТА ДОСТАВКИ             ← критично для 1С
+# R19  подсказки
+# R20  заголовки колонок
+# R21  нумерация
+# R22+ данные товаров
+
+_DATA_START = 22
+
 
 def export_rus_variant_a(
     path: Path,
@@ -361,15 +158,367 @@ def export_rus_variant_a(
     client,
     quote_date: date,
     lines: list[RusLine],
+    delivery_date: date | None = None,
+    order_no: str = "",
 ) -> None:
     wb = Workbook()
+    ws = wb.active
+    ws.title = "RUS"
 
-    ws_client = wb.active
-    _build_client_sheet(ws_client, client, quote_date)
+    # ── Ширины колонок ────────────────────────────────────────
+    col_widths = {
+        1: 12, 2: 18, 3: 42, 4: 7, 5: 9, 6: 12, 7: 14,
+        8: 12, 9: 11, 10: 11, 11: 11, 12: 11, 13: 11,
+        14: 10, 15: 13, 16: 13, 17: 13, 18: 13,
+        19: 11, 20: 11, 21: 9, 22: 12, 23: 10,
+        24: 16, 25: 16, 26: 16,
+        27: 10, 28: 10, 29: 13, 30: 5, 31: 14,
+    }
+    for col, width in col_widths.items():
+        ws.column_dimensions[get_column_letter(col)].width = width
 
-    ws_order = wb.create_sheet("ORDER")
-    _build_order_sheet(ws_order, lines)
+    # ── Строка 1: No ──────────────────────────────────────────
+    ws.merge_cells("B1:T1")
+    no_text = f"No: {order_no}" if order_no else "No: …......"
+    _set(ws["B1"], no_text, bold=True, size=11, fg=_C_HEADER_FG, bg=_C_HEADER_BG)
+    ws.row_dimensions[1].height = 18
 
+    # ── Строка 2: Информация о Покупателе ─────────────────────
+    ws.merge_cells("B2:G2")
+    _set(ws["B2"], "Информация о Покупателе*", bold=True, size=10,
+         fg=_C_HEADER_FG, bg=_C_HEADER_BG)
+    ws.row_dimensions[2].height = 16
+
+    # ── Строки 3–9: данные покупателя ────────────────────────
+    buyer_rows = [
+        (3,  "Название Компании",          client.name if client else ""),
+        (4,  "ИНН",                        client.inn  if client else ""),
+        (5,  "Контактное Лицо",            client.contact_person if client else ""),
+        (6,  "Адрес",                      client.addresses if client else ""),
+        (7,  "Город/Штат/Почтовый Индекс", client.city_region_zip if client else ""),
+        (8,  "Телефон",                    client.contacts if client else ""),
+        (9,  "Электронная почта",          client.email if client else ""),
+    ]
+    for row_num, label, value in buyer_rows:
+        ws.row_dimensions[row_num].height = 15
+        lc = ws.cell(row=row_num, column=2, value=label)
+        _set(lc, bold=True, bg=_C_LABEL_BG, border=True)
+        vc = ws.cell(row=row_num, column=3, value=value)
+        ws.merge_cells(start_row=row_num, start_column=3,
+                       end_row=row_num, end_column=7)
+        _set(vc, bg=_C_VALUE_BG, border=True)
+
+    # ── Тип клиента — в ячейку H3 (как "Базовый прайс-лист" в шаблоне) ──
+    # Не добавляем отдельную строку, чтобы не сдвигать нумерацию для 1С
+    client_type_label = ""
+    if client:
+        if hasattr(client, "client_type_label"):
+            client_type_label = client.client_type_label
+        elif hasattr(client, "client_type"):
+            from crm_desktop.repositories.clients import CLIENT_TYPES
+            client_type_label = CLIENT_TYPES.get(client.client_type, client.client_type)
+    if client_type_label:
+        disc_suffix = ""
+        if client and hasattr(client, "type_discount_pct") and client.type_discount_pct > 0:
+            disc_suffix = f"  (скидка -{client.type_discount_pct:.0f}%)"
+        h3 = ws.cell(row=3, column=8,
+                     value=f"Тип клиента: {client_type_label}{disc_suffix}")
+        h3.font = _f(bold=True, size=9, color=_C_TYPE_FG)
+        h3.fill = _fill(_C_TYPE_BG)
+        h3.alignment = _al(h="left")
+
+    # ── Строка 10: Информация о Грузополучателе ───────────────
+    ws.merge_cells("B10:G10")
+    _set(ws["B10"], "Информация о Грузополучателе*", bold=True, size=10,
+         fg=_C_HEADER_FG, bg=_C_HEADER_BG)
+    ws.row_dimensions[10].height = 16
+
+    # ── Строки 11–16: данные грузополучателя ──────────────────
+    cons_rows = [
+        (11, "Название Компании",          client.consignee_name if client else ""),
+        (12, "Контактное Лицо",            client.consignee_contact_person if client else ""),
+        (13, "Адрес",                      client.consignee_address if client else ""),
+        (14, "Город/Штат/Почтовый Индекс", client.consignee_city_region_zip if client else ""),
+        (15, "Телефон",                    client.consignee_phone if client else ""),
+        (16, "Электронная почта",          client.consignee_email if client else ""),
+    ]
+    for row_num, label, value in cons_rows:
+        ws.row_dimensions[row_num].height = 15
+        lc = ws.cell(row=row_num, column=2, value=label)
+        _set(lc, bold=True, bg=_C_LABEL_BG, border=True)
+        vc = ws.cell(row=row_num, column=3, value=value)
+        ws.merge_cells(start_row=row_num, start_column=3,
+                       end_row=row_num, end_column=7)
+        _set(vc, bg=_C_VALUE_BG, border=True)
+
+    # ── Строка 17: ДАТА ЗАКАЗА (критично для 1С) ─────────────
+    ws.row_dimensions[17].height = 15
+    _set(ws.cell(row=17, column=2), "ДАТА ЗАКАЗА",
+         bold=True, bg=_C_LABEL_BG, border=True)
+    dvc = ws.cell(row=17, column=3, value=quote_date.strftime("%d.%m.%Y"))
+    ws.merge_cells(start_row=17, start_column=3, end_row=17, end_column=7)
+    _set(dvc, bg=_C_VALUE_BG, border=True, h="center")
+
+    # ── Строка 18: ДАТА ДОСТАВКИ ──────────────────────────────
+    ws.row_dimensions[18].height = 15
+    _set(ws.cell(row=18, column=2), "ДАТА ДОСТАВКИ",
+         bold=True, bg=_C_LABEL_BG, border=True)
+    ddvc = ws.cell(row=18, column=3,
+                   value=delivery_date.strftime("%d.%m.%Y") if delivery_date else "")
+    ws.merge_cells(start_row=18, start_column=3, end_row=18, end_column=7)
+    _set(ddvc, bg=_C_VALUE_BG, border=True, h="center")
+
+    # ── Строка 19: подсказки ──────────────────────────────────
+    ws.row_dimensions[19].height = 13
+    ws.merge_cells("B19:C19")
+    ws["E19"].value = "Кол-во"
+    ws["F19"].value = "Цена"
+    ws["G19"].value = "Итоговая цена"
+    ws.merge_cells("AA19:AC19")
+    ws["AA19"].value = "Размеры паллеты (1200*1000) финский и кол-во"
+    for ref in ("E19", "F19", "G19", "AA19"):
+        _set(ws[ref], size=8, fg="595959", h="center")
+
+    # ── Строка 20: заголовки колонок ─────────────────────────
+    ws.row_dimensions[20].height = 32
+    col_headers = {
+        1:  "Артикул",
+        2:  "Баркод коробки",
+        3:  "Наименование Товара",
+        4:  "Ед. Измерения",
+        5:  "Заказ (КОР)",
+        6:  "Цена итог (КОР)",
+        7:  "Итоговая цена заказа",
+        8:  "Цена за Штуку (РУБ), регулярная цена",
+        9:  "Предоплата -2%",
+        10: "Объем > 300 кор",
+        11: "Объем > 500 кор",
+        12: "Акция 15+2 (КОФЕ)",
+        13: "Акция 10+3 (КОНФ)",
+        14: "Количество в кор. (ШТ)",
+        15: "Цена Короба рег. прайс (РУБ)",
+        16: "Цена Короба -2% (РУБ)",
+        17: "Цена Короба -6% (РУБ)",
+        18: "Цена Короба -8% (РУБ)",
+        19: "Доп. скидка (РУБ)*",
+        20: "Количество на паллете (КОР)",
+        21: "Итого Паллет",
+        22: "масса брутто, (КГ)",
+        23: "объём, (м3)",
+        24: "Регулярная Итоговая сумма заказа (РУБ)",
+        25: "Итоговая сумма заказа + акция (РУБ)",
+        26: "Итоговая сумма заказа, акция +мот (РУБ)",
+        27: "кол-во коробов в ряде",
+        28: "кол-во рядов в паллете",
+        29: "высота с паллетой (мм)",
+        31: "размер короба д*ш*в",
+    }
+    for col, label in col_headers.items():
+        c = ws.cell(row=20, column=col, value=label)
+        c.font = _f(bold=True, size=8)
+        c.fill = _fill(_C_COL_HDR)
+        c.border = _BORDER
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    # ── Строка 21: нумерация ──────────────────────────────────
+    ws.row_dimensions[21].height = 12
+    num_map = {2: 1, 3: 2, 4: 3, 8: 4, 14: 5, 15: 6, 16: 7,
+               19: 8, 20: 9, 21: 11, 22: 12, 23: 14, 24: 13,
+               25: 13, 26: 13, 27: 16, 28: 17, 29: 18, 31: 20}
+    for col, num in num_map.items():
+        c = ws.cell(row=21, column=col, value=num)
+        c.font = _f(size=7, color="595959")
+        c.alignment = _al(h="center")
+
+    # ── Строки данных (с 22) ──────────────────────────────────
+    last_data_row = _DATA_START + len(lines) - 1
+
+    for idx, line in enumerate(lines):
+        r = _DATA_START + idx
+        ws.row_dimensions[r].height = 15
+        mr = line.matrix_rules
+
+        if line.is_bonus:
+            _write_bonus_row(ws, r, line)
+            continue
+
+        price_box   = line.regular_price_per_box or line.base_price
+        price_piece = line.regular_price_per_piece or (
+            price_box / line.units_per_box if line.units_per_box else 0.0
+        )
+        # Итоговая цена за коробку с учётом скидки
+        price_after = price_box * (1 - line.discount_percent / 100) if line.discount_percent else price_box
+        # Итого строки = qty × price_after
+        line_sum    = line.qty * price_after if line.qty else 0.0
+        # Цена за штуку после скидки
+        price_piece_after = price_after / line.units_per_box if line.units_per_box else price_after
+
+        pallets    = line.qty / line.boxes_per_pallet if line.boxes_per_pallet and line.qty else 0.0
+        mass_total = line.gross_weight_kg * line.qty if line.gross_weight_kg and line.qty else 0.0
+        vol_total  = line.volume_m3 * line.qty if line.volume_m3 and line.qty else 0.0
+
+        # Регулярная цена короба = price_box × units_per_box (до скидки)
+        price_reg = round(price_box * line.units_per_box, 4) if line.units_per_box else round(price_box, 4)
+
+        # ── Коэффициенты скидок из matrix_rules ──────────────
+        prepay_disc = _mr_prepay_disc(mr) or 2.0       # дефолт 2% если не задан
+        vol_300_disc = _mr_volume_disc(mr, 300) or 6.0  # дефолт 6%
+        vol_500_disc = _mr_volume_disc(mr, 500) or 8.0  # дефолт 8%
+
+        # C9-C11: коэффициент (1 = нет скидки, 0.98 = -2%)
+        prepay_coeff = round(1.0 - prepay_disc / 100, 6) if mr.get("prepay_25") or any(
+            k.startswith("prepay_") for k in mr) else 1.0
+        vol_300_coeff = round(1.0 - vol_300_disc / 100, 6) if mr.get("volume_300") or any(
+            k == "volume_300" for k in mr) else 1.0
+        vol_500_coeff = round(1.0 - vol_500_disc / 100, 6) if mr.get("volume_500") or any(
+            k == "volume_500" for k in mr) else 1.0
+
+        # C12: коэффициент первой акции (threshold/(threshold+same_qty))
+        # C13: кол-во коробок второй акции
+        promo_rules = _mr_promo_rules(mr)
+        promo1_coeff = 1.0
+        promo2_count = 0
+        if promo_rules:
+            thr, same = promo_rules[0]
+            if thr > 0 and same > 0:
+                promo1_coeff = round(thr / (thr + same), 6)
+        if len(promo_rules) > 1:
+            _, same2 = promo_rules[1]
+            promo2_count = same2
+
+        # C16-C18: цена за короб при каждой скидке (эталонные значения)
+        price_m_prepay = round(price_reg * (1 - prepay_disc / 100), 2)
+        price_m_v300   = round(price_reg * (1 - vol_300_disc / 100), 2)
+        price_m_v500   = round(price_reg * (1 - vol_500_disc / 100), 2)
+
+        # C19: доп. скидка в рублях (expiry_rub из matrix_rules или расчётная)
+        try:
+            _erub = float(mr.get("expiry_rub") or 0)
+        except (ValueError, TypeError):
+            _erub = 0.0
+        if _erub > 0:
+            extra_disc = _erub
+        else:
+            extra_disc = round(price_reg - price_after * line.units_per_box, 2) if line.units_per_box else 0.0
+
+        data = {
+            1:  line.external_id,
+            2:  line.box_barcode,
+            3:  line.name,
+            4:  line.unit,
+            5:  line.qty or None,
+            # C6 = итого строки (qty × price_after) — соответствует шаблону
+            6:  round(line_sum, 2) or None,
+            # C7 = цена за штуку после скидки — соответствует шаблону
+            7:  round(price_piece_after, 4) or None,
+            8:  round(price_piece, 4) or None,
+            9:  prepay_coeff,
+            10: vol_300_coeff,
+            11: vol_500_coeff,
+            12: promo1_coeff,
+            13: promo2_count or None,
+            14: line.units_per_box or None,
+            15: round(price_reg, 4) or None,
+            16: price_m_prepay or None,
+            17: price_m_v300 or None,
+            18: price_m_v500 or None,
+            19: extra_disc if extra_disc > 0 else None,
+            20: line.boxes_per_pallet or None,
+            21: round(pallets, 2) or None,
+            22: round(mass_total, 3) or None,
+            23: round(vol_total, 4) or None,
+            24: round(line.qty * price_box, 2) if line.qty and price_box else None,
+            25: round(line_sum, 2) or None,
+            26: None,
+            27: line.boxes_in_row or None,
+            28: line.rows_per_pallet or None,
+            29: line.pallet_height_mm or None,
+            31: line.box_dimensions or None,
+        }
+
+        bg = _C_VALUE_BG if idx % 2 == 0 else _C_DATA_ALT
+
+        for col, val in data.items():
+            c = ws.cell(row=r, column=col, value=val)
+            c.border = _BORDER
+            c.fill   = _fill(bg)
+            c.font   = _f(size=9)
+            if col == 3:
+                c.alignment = _al(h="left")
+            elif col in (24, 25, 26):
+                c.font = _f(size=9, bold=True)
+                c.alignment = _al(h="right")
+            else:
+                c.alignment = _al(h="center")
+
+    # ── Строка ИТОГО ─────────────────────────────────────────
+    regular_rows = [
+        _DATA_START + i
+        for i, ln in enumerate(lines)
+        if not ln.is_bonus
+    ]
+
+    total_row = last_data_row + 1
+    ws.row_dimensions[total_row].height = 16
+    ws.merge_cells(start_row=total_row, start_column=1,
+                   end_row=total_row, end_column=4)
+    tc = ws.cell(row=total_row, column=1, value="ИТОГО регулярный ассортимент")
+    _set(tc, bold=True, size=9, fg=_C_TOTAL_FG, bg=_C_TOTAL_BG, h="right", border=True)
+
+    for col in range(1, 32):
+        if col <= 4:
+            continue
+        c = ws.cell(row=total_row, column=col)
+        c.fill   = _fill(_C_TOTAL_BG)
+        c.font   = _f(bold=True, size=9, color=_C_TOTAL_FG)
+        c.border = _BORDER
+        c.alignment = _al(h="right")
+
+    if regular_rows:
+        def _sum_formula(col_letter: str) -> str:
+            parts = [f"{col_letter}{r}" for r in regular_rows]
+            return "=" + "+".join(parts)
+
+        for col_num in (5, 6, 7, 21, 22, 23, 24, 25, 26):
+            cl = get_column_letter(col_num)
+            ws.cell(row=total_row, column=col_num).value = _sum_formula(cl)
+
+    # ── Заморозка ─────────────────────────────────────────────
+    ws.freeze_panes = f"A{_DATA_START}"
+
+    # ── Сохранение ───────────────────────────────────────────
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
+
+
+def _write_bonus_row(ws, r: int, line: RusLine) -> None:
+    """Бонусная строка: товар бесплатно — цена и суммы = 0."""
+    data = {
+        1:  line.external_id,
+        2:  line.box_barcode,
+        3:  f"БОНУС: {line.name}",
+        4:  line.unit,
+        5:  line.qty or None,
+        6:  0,
+        7:  0,
+        8:  None,
+        9:  None, 10: None, 11: None, 12: None, 13: None,
+        14: line.units_per_box or None,
+        15: None, 16: None, 17: None, 18: None, 19: None,
+        20: line.boxes_per_pallet or None,
+        21: None, 22: None, 23: None,
+        24: 0,
+        25: 0,
+        26: None,
+        27: None, 28: None, 29: None, 31: None,
+    }
+    for col, val in data.items():
+        c = ws.cell(row=r, column=col, value=val)
+        c.border = _BORDER
+        c.fill   = _fill(_C_BONUS_BG)
+        c.font   = _f(size=9, bold=(col == 3), color="1F4E79")
+        if col == 3:
+            c.alignment = _al(h="left")
+        else:
+            c.alignment = _al(h="center")
