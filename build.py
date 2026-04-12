@@ -89,9 +89,24 @@ def _ensure_pyinstaller() -> None:
         print("[build] PyInstaller установлен.")
 
 
+def _kill_running_app() -> None:
+    """Завершает запущенный CRM_Desktop.exe перед очисткой."""
+    import time
+    result = subprocess.run(
+        ["taskkill", "/F", "/IM", f"{APP_NAME}.exe"],
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        print(f"[build] Завершён процесс {APP_NAME}.exe")
+        time.sleep(1)  # даём Windows отпустить файлы
+
+
 def _clean() -> None:
     """Удаляет старые артефакты сборки."""
     import stat, time
+
+    # Сначала завершаем приложение, чтобы снять блокировки с .pyd/.dll
+    _kill_running_app()
 
     def _on_error(func, path, exc_info):
         """Снимаем readonly и пробуем ещё раз (для заблокированных .pyd/.dll)."""
@@ -99,7 +114,7 @@ def _clean() -> None:
             os.chmod(path, stat.S_IWRITE)
             func(path)
         except Exception:
-            time.sleep(0.3)
+            time.sleep(0.5)
             try:
                 func(path)
             except Exception:
@@ -131,7 +146,9 @@ def _build(onefile: bool = False) -> None:
     cmd: list[str] = [
         _python(), "-m", "PyInstaller",
         "--noconfirm",
-        "--clean",
+        # Не передаём --clean PyInstaller'у: он сам пытается удалить dist и падает
+        # на заблокированных .pyd/.dll (антивирус, Windows Defender).
+        # Очистку делаем сами в _clean() до запуска PyInstaller.
         "--name", APP_NAME,
         "--windowed",               # без консольного окна (GUI-приложение)
         "--paths", src_path,        # чтобы находились модули из src/
