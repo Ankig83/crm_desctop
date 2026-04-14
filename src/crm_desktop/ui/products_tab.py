@@ -47,7 +47,7 @@ class ProductsTab(QWidget):
         self._table.setColumnCount(15)
         self._table.setHorizontalHeaderLabels([
             "#",
-            "ID товара",
+            "Артикул",
             "Наименование",
             "Базовая цена\n(кор)",
             "Баркод коробки",
@@ -76,7 +76,7 @@ class ProductsTab(QWidget):
         btn_del.clicked.connect(self._delete_row)
 
         self._search = QLineEdit()
-        self._search.setPlaceholderText("🔍  Поиск по названию или ID товара…")
+        self._search.setPlaceholderText("🔍  Поиск по названию или артикулу…")
         self._search.setClearButtonEnabled(True)
         self._search.textChanged.connect(self._apply_filter)
 

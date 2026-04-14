@@ -134,6 +134,13 @@ class ClientsTab(QWidget):
         btn_new.clicked.connect(self._new_client)
         btn_del = QPushButton("Удалить")
         btn_del.clicked.connect(self._delete_current)
+        self._btn_save = QPushButton("Сохранить")
+        self._btn_save.setStyleSheet(
+            "QPushButton { background: #1F4E79; color: white; font-weight: bold;"
+            " padding: 4px 14px; border-radius: 4px; }"
+            "QPushButton:hover { background: #2E75B6; }"
+        )
+        self._btn_save.clicked.connect(self._save_clicked)
 
         # ── Группа «Грузополучатель» ──────────────────────────
         gb_con = QGroupBox("Грузополучатель (для RUS)")
@@ -210,6 +217,8 @@ class ClientsTab(QWidget):
         row = QHBoxLayout()
         row.addWidget(btn_new)
         row.addWidget(btn_del)
+        row.addStretch()
+        row.addWidget(self._btn_save)
         form.addLayout(row)
 
         _h_text = 100
@@ -371,36 +380,52 @@ class ClientsTab(QWidget):
                     )
                 break
 
+    # ── Сохранение по кнопке ─────────────────────────────────
+    def _save_clicked(self) -> None:
+        self._save_current()
+        self._btn_save.setText("Сохранено!")
+        QTimer.singleShot(1500, lambda: self._btn_save.setText("Сохранить"))
+
     # ── Создание нового клиента ───────────────────────────────
     def _new_client(self) -> None:
-        nid = clients.insert(
-            self._conn,
-            external_id=None,
-            name="",
-            inn="",
-            contacts="",
-            addresses="",
-            unload_points="",
-            contact_person="",
-            email="",
-            city_region_zip="",
-            consignee_name="",
-            consignee_contact_person="",
-            consignee_address="",
-            consignee_city_region_zip="",
-            consignee_phone="",
-            consignee_email="",
-            is_new=True,
-            client_type="regular",  # ← новое
-        )
-        audit.log(self._conn, "create", "client", str(nid))
-        self._current_id = nid
-        self.reload()
-        for i in range(self._list.count()):
-            it = self._list.item(i)
-            if it and it.data(Qt.ItemDataRole.UserRole) == nid:
-                self._list.setCurrentRow(i)
-                break
+        # Блокируем автосохранение на время reload/setCurrentRow,
+        # иначе данные предыдущего клиента попадают в новую запись.
+        self._loading = True
+        try:
+            nid = clients.insert(
+                self._conn,
+                external_id=None,
+                name="",
+                inn="",
+                contacts="",
+                addresses="",
+                unload_points="",
+                contact_person="",
+                email="",
+                city_region_zip="",
+                consignee_name="",
+                consignee_contact_person="",
+                consignee_address="",
+                consignee_city_region_zip="",
+                consignee_phone="",
+                consignee_email="",
+                is_new=True,
+                client_type="regular",
+            )
+            audit.log(self._conn, "create", "client", str(nid))
+            self._current_id = nid
+            self.reload()
+            for i in range(self._list.count()):
+                it = self._list.item(i)
+                if it and it.data(Qt.ItemDataRole.UserRole) == nid:
+                    self._list.setCurrentRow(i)
+                    break
+        finally:
+            self._loading = False
+        # Загружаем пустую форму нового клиента
+        c = clients.get(self._conn, nid)
+        if c:
+            self._load_form(c)
 
     # ── Удаление клиента ─────────────────────────────────────
     def _delete_current(self) -> None:
