@@ -35,3 +35,9 @@ promotions*.xlsx
 # Временные файлы анализа
 tmp_*.txt
 _version_info.txt
+
+# Архивы с собранным EXE (не исходный код)
+dist.zip
+dist.7z
+CRM_Desktop*.zip
+CRM_Desktop*.7z
