@@ -93,6 +93,7 @@ class QuoteTab(QWidget):
         super().__init__(parent)
         self._conn = conn
         self._block = False
+        self._recalcing = False          # защита от рекурсивного вызова _recalc
         self._bonus_choices: dict[int, str] = {}
 
         # ── Клиент ───────────────────────────────────────────
@@ -367,8 +368,30 @@ class QuoteTab(QWidget):
 
     def _collect_bonus_thresholds(
         self, matrix_rules: dict
-    ) -> list[tuple[float, int, int, list[str]]]:
-        """[(threshold_qty, same_qty, other_qty, [other_ids]), ...]"""
+    ) -> list[tuple[float, int, str, int, list[str]]]:
+        """[(threshold, same_qty, fixed_id, fixed_qty, choice_ids), ...]"""
+        from crm_desktop.utils.bonus_ids import parse_product_external_ids_csv
+
+        # Новый формат: bonus_rules JSON-массив
+        if "bonus_rules" in matrix_rules:
+            try:
+                rules = json.loads(str(matrix_rules["bonus_rules"]))
+                result = []
+                for rule in rules:
+                    threshold = float(rule.get("threshold", 0))
+                    if threshold <= 0:
+                        continue
+                    same_qty  = int(rule.get("same_qty", 0))
+                    fixed_id  = str(rule.get("fixed_id", "")).strip()
+                    fixed_qty = max(1, int(rule.get("fixed_qty", 1)))
+                    raw_choice = str(rule.get("choice_ids", "")).strip()
+                    choice_ids = parse_product_external_ids_csv(raw_choice) if raw_choice else []
+                    result.append((threshold, same_qty, fixed_id, fixed_qty, choice_ids))
+                return result
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Старый формат: promo_N_M_qty ключи (обратная совместимость)
         names: set[str] = set()
         for key in matrix_rules:
             if key.startswith("promo_") and key.endswith("_qty"):
@@ -384,14 +407,13 @@ class QuoteTab(QWidget):
             other_ids: list[str] = []
             raw_ids = matrix_rules.get(f"promo_{name}_ids", "")
             if raw_ids:
-                from crm_desktop.utils.bonus_ids import parse_product_external_ids_csv
                 other_ids = parse_product_external_ids_csv(str(raw_ids))
-            result.append((threshold, same_qty, len(other_ids) > 0, other_ids))
+            result.append((threshold, same_qty, "", 1, other_ids))
         return result
 
     def _find_best_threshold(
-        self, thresholds: list[tuple[float, int, int, list[str]]], qty: float
-    ) -> tuple[float, int, int, list[str]] | None:
+        self, thresholds: list[tuple[float, int, str, int, list[str]]], qty: float
+    ) -> tuple[float, int, str, int, list[str]] | None:
         best = None
         for t in thresholds:
             if qty >= t[0]:
@@ -498,7 +520,7 @@ class QuoteTab(QWidget):
         self._recalc()
 
     def _on_changed(self, row: int, col: int) -> None:
-        if self._block:
+        if self._block or self._recalcing:
             return
         if col == _C_QTY and not self._is_bonus_row(row):
             self._recalc()
@@ -516,7 +538,17 @@ class QuoteTab(QWidget):
     # ─────────────────────────────────────────────────────────
 
     def _recalc(self) -> None:
+        if self._recalcing:
+            return
+        self._recalcing = True
         self._block = True
+        try:
+            self._recalc_impl()
+        finally:
+            self._recalcing = False
+            self._block = False
+
+    def _recalc_impl(self) -> None:
         self._update_client_discount_label()
         qd = self._quote_date()
         client_pct = self._client_type_pct()
@@ -598,24 +630,33 @@ class QuoteTab(QWidget):
                 best = self._find_best_threshold(thresholds, qty)
 
                 if best:
-                    threshold, same_qty, has_other, other_ids = best
+                    threshold, same_qty, fixed_id, fixed_qty, choice_ids = best
                     ins = r
 
+                    # 1) Бесплатные коробки того же товара
                     if same_qty > 0:
                         ins = self._add_bonus_row(
                             ins, p, same_qty,
                             f"  ×{same_qty} (купи {threshold:.0f} → получи {same_qty} бесплатно)"
                         )
 
-                    if other_ids:
+                    # 2) Конкретный другой товар (фиксированный, автоматически)
+                    if fixed_id:
+                        bp_fixed = products.by_external_id(self._conn, fixed_id)
+                        if bp_fixed:
+                            ins = self._add_bonus_row(
+                                ins, bp_fixed, fixed_qty,
+                                f"  ×{fixed_qty} (бонус: {bp_fixed.name})"
+                            )
+
+                    # 3) Товар на выбор из списка (менеджер выбирает)
+                    if choice_ids:
                         chosen = self._bonus_choices.get(r)
-                        if len(other_ids) == 1:
-                            chosen = other_ids[0]
+                        if len(choice_ids) == 1:
+                            chosen = choice_ids[0]
                             self._bonus_choices[r] = chosen
-                        elif chosen not in other_ids:
-                            self._block = False
-                            chosen = self._ask_bonus_choice(other_ids)
-                            self._block = True
+                        elif chosen not in choice_ids:
+                            chosen = self._ask_bonus_choice(choice_ids)
                             if chosen:
                                 self._bonus_choices[r] = chosen
 
@@ -624,14 +665,14 @@ class QuoteTab(QWidget):
                             if bp:
                                 self._add_bonus_row(
                                     ins, bp, 1,
-                                    f"  (бонус на выбор, ID: {chosen})"
+                                    f"  (бонус на выбор)"
                                 )
 
             r += 1
 
         self._total.setText(f"{total_with_prepay:.2f}")
         self._update_prepay_label(total_no_prepay, total_with_prepay)
-        self._block = False
+        # _block сбрасывается в finally блоке _recalc
 
     # ─────────────────────────────────────────────────────────
     # Текстовый расчёт

@@ -160,48 +160,46 @@ class PromotionsTab(QWidget):
         expiry_form.addRow("Скидка %:", self._expiry_pct)
         expiry_form.addRow("Доп. скидка руб:", self._expiry_rub)
 
-        # ── QGroupBox: Акционные бонусы ───────────────────────
-        self._promo_rows: list[tuple[QSpinBox, QSpinBox, QLineEdit]] = []
+        # ── QGroupBox: Акционные бонусы (динамическая таблица) ──
         gb_promo = QGroupBox("Акционные бонусы (купи → получи бесплатно)")
         promo_lay = QVBoxLayout(gb_promo)
+        promo_lay.addWidget(QLabel(
+            "Задайте правила: порог покупки → что дать бесплатно.\n"
+            "«Конкретный товар» добавляется автоматически. «На выбор» — менеджер выбирает в расчёте."
+        ))
 
-        for i in range(2):
-            row_label = QLabel(f"  Акция {i + 1}")
-            row_label.setStyleSheet("font-weight: bold; color: #1F4E79;")
+        self._bonus_table = QTableWidget(0, 5)
+        self._bonus_table.setHorizontalHeaderLabels([
+            "Порог (кор)", "Тот же +кор", "Конкретный (арт.)", "Кол-во", "На выбор (арт., запятая)",
+        ])
+        self._bonus_table.setMinimumHeight(130)
+        self._bonus_table.setColumnWidth(0, 85)
+        self._bonus_table.setColumnWidth(1, 85)
+        self._bonus_table.setColumnWidth(2, 130)
+        self._bonus_table.setColumnWidth(3, 60)
+        self._bonus_table.horizontalHeader().setStretchLastSection(True)
+        self._bonus_table.setToolTip(
+            "Порог       — мин. кол-во коробок для активации бонуса.\n"
+            "Тот же      — бесплатных кор. ТОГО ЖЕ товара.\n"
+            "Конкретный  — артикул другого товара (добавляется автоматически).\n"
+            "Кол-во      — сколько коробок конкретного товара.\n"
+            "На выбор    — артикулы через запятую; менеджер выберет 1 в расчёте."
+        )
 
-            thr_spin = QSpinBox()
-            thr_spin.setRange(0, 9_999)
-            thr_spin.setSuffix(" кор")
-            thr_spin.setSpecialValueText("—")
-            thr_spin.setToolTip("Порог: купи не менее N коробок → бонус срабатывает. 0 = акция не задана.")
+        btn_add_bonus = QPushButton("+ Правило")
+        btn_del_bonus = QPushButton("− Удалить")
+        btn_add_bonus.setMaximumWidth(90)
+        btn_del_bonus.setMaximumWidth(90)
+        btn_add_bonus.clicked.connect(self._bonus_add_row)
+        btn_del_bonus.clicked.connect(lambda: self._table_del_row(self._bonus_table))
 
-            same_spin = QSpinBox()
-            same_spin.setRange(0, 999)
-            same_spin.setSuffix(" кор")
-            same_spin.setToolTip("Бесплатно того же товара в коробках.")
+        bonus_btns = QHBoxLayout()
+        bonus_btns.addWidget(btn_add_bonus)
+        bonus_btns.addWidget(btn_del_bonus)
+        bonus_btns.addStretch()
 
-            other_edit = QLineEdit()
-            other_edit.setPlaceholderText("ID бонусных товаров другого вида (через запятую)")
-            other_edit.setToolTip(
-                "Внешние ID товаров, один из которых клиент получает бесплатно.\n"
-                "Если несколько — менеджер выбирает в диалоге при расчёте."
-            )
-
-            self._promo_rows.append((thr_spin, same_spin, other_edit))
-
-            row_h = QHBoxLayout()
-            row_h.addWidget(QLabel("Купи ≥"))
-            row_h.addWidget(thr_spin)
-            row_h.addWidget(QLabel("  →  того же бесплатно:"))
-            row_h.addWidget(same_spin)
-            row_h.addStretch()
-
-            promo_lay.addWidget(row_label)
-            promo_lay.addLayout(row_h)
-            promo_lay.addWidget(QLabel("    Другие бонусные товары (ID через запятую):"))
-            promo_lay.addWidget(other_edit)
-            if i < 1:
-                promo_lay.addWidget(_hsep())
+        promo_lay.addWidget(self._bonus_table)
+        promo_lay.addLayout(bonus_btns)
 
         # Даты акционных бонусов
         promo_lay.addWidget(_hsep())
@@ -339,17 +337,37 @@ class PromotionsTab(QWidget):
         if erub > 0:
             mr["expiry_rub"] = erub
 
-        # Акционные бонусы
-        for thr_spin, same_spin, other_edit in self._promo_rows:
-            thr = thr_spin.value()
-            same = same_spin.value()
-            if thr <= 0:
+        # Акционные бонусы → JSON-массив правил
+        bonus_rules = []
+        for row in range(self._bonus_table.rowCount()):
+            def _cell(col: int) -> str:
+                it = self._bonus_table.item(row, col)
+                return it.text().strip() if it else ""
+            try:
+                threshold = float(_cell(0) or 0)
+            except ValueError:
                 continue
-            name = f"{thr}_{same}"
-            mr[f"promo_{name}_qty"] = same
-            other_ids = normalize_product_external_ids_csv(other_edit.text())
-            if other_ids:
-                mr[f"promo_{name}_ids"] = other_ids
+            if threshold <= 0:
+                continue
+            try:
+                same_qty = int(float(_cell(1) or 0))
+            except ValueError:
+                same_qty = 0
+            fixed_id = _cell(2)
+            try:
+                fixed_qty = max(1, int(float(_cell(3) or 1)))
+            except ValueError:
+                fixed_qty = 1
+            choice_ids = normalize_product_external_ids_csv(_cell(4))
+            bonus_rules.append({
+                "threshold": threshold,
+                "same_qty": same_qty,
+                "fixed_id": fixed_id,
+                "fixed_qty": fixed_qty,
+                "choice_ids": choice_ids,
+            })
+        if bonus_rules:
+            mr["bonus_rules"] = json.dumps(bonus_rules, ensure_ascii=False)
 
         # Даты акционных бонусов
         if not self._promo_no_start.isChecked():
@@ -403,32 +421,38 @@ class PromotionsTab(QWidget):
         except (ValueError, TypeError):
             self._expiry_rub.setValue(0.0)
 
-        # Акционные бонусы — находим все promo_*_qty ключи (не date)
-        promo_names: list[str] = sorted(
-            key[len("promo_"):-len("_qty")]
-            for key in mr
-            if key.startswith("promo_") and key.endswith("_qty")
-        )[:2]
-
-        for i, (thr_spin, same_spin, other_edit) in enumerate(self._promo_rows):
-            if i < len(promo_names):
-                name = promo_names[i]
+        # Акционные бонусы — новый формат bonus_rules, fallback на старый promo_*_qty
+        self._bonus_table.setRowCount(0)
+        if "bonus_rules" in mr:
+            try:
+                for rule in json.loads(str(mr["bonus_rules"])):
+                    self._bonus_table_insert(
+                        str(rule.get("threshold", "")),
+                        str(rule.get("same_qty", "0")),
+                        str(rule.get("fixed_id", "")),
+                        str(rule.get("fixed_qty", "1")),
+                        str(rule.get("choice_ids", "")),
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            # Старый формат: promo_N_M_qty
+            for name in sorted(
+                key[len("promo_"):-len("_qty")]
+                for key in mr
+                if key.startswith("promo_") and key.endswith("_qty")
+            ):
                 parts = name.split("_")
                 try:
-                    thr_spin.setValue(int(float(parts[0])))
+                    thr = str(int(float(parts[0])))
                 except (ValueError, IndexError):
-                    thr_spin.setValue(0)
+                    continue
                 try:
-                    same_val = int(float(mr.get(f"promo_{name}_qty", 0) or 0))
-                    same_spin.setValue(same_val)
+                    same = str(int(float(mr.get(f"promo_{name}_qty", 0) or 0)))
                 except (ValueError, TypeError):
-                    same_spin.setValue(0)
-                raw_ids = mr.get(f"promo_{name}_ids", "")
-                other_edit.setText(str(raw_ids) if raw_ids else "")
-            else:
-                thr_spin.setValue(0)
-                same_spin.setValue(0)
-                other_edit.clear()
+                    same = "0"
+                ids = str(mr.get(f"promo_{name}_ids", "") or "")
+                self._bonus_table_insert(thr, same, "", "1", ids)
 
         # Даты акционных бонусов
         from_s = str(mr.get("promo_date_from", "") or "")
@@ -463,14 +487,25 @@ class PromotionsTab(QWidget):
         self._volume_table.setRowCount(0)
         self._expiry_pct.setValue(0.0)
         self._expiry_rub.setValue(0.0)
-        for thr_spin, same_spin, other_edit in self._promo_rows:
-            thr_spin.setValue(0)
-            same_spin.setValue(0)
-            other_edit.clear()
+        self._bonus_table.setRowCount(0)
         self._promo_no_start.setChecked(True)
         self._promo_no_end.setChecked(True)
         self._promo_date_from.setEnabled(False)
         self._promo_date_to.setEnabled(False)
+
+    def _bonus_add_row(self) -> None:
+        self._bonus_table_insert("50", "0", "", "1", "")
+
+    def _bonus_table_insert(
+        self, threshold: str, same_qty: str, fixed_id: str, fixed_qty: str, choice_ids: str
+    ) -> None:
+        r = self._bonus_table.rowCount()
+        self._bonus_table.insertRow(r)
+        self._bonus_table.setItem(r, 0, QTableWidgetItem(threshold))
+        self._bonus_table.setItem(r, 1, QTableWidgetItem(same_qty))
+        self._bonus_table.setItem(r, 2, QTableWidgetItem(fixed_id))
+        self._bonus_table.setItem(r, 3, QTableWidgetItem(fixed_qty))
+        self._bonus_table.setItem(r, 4, QTableWidgetItem(choice_ids))
 
     # ─────────────────────────────────────────────────────────
     # Список акций
@@ -586,20 +621,23 @@ class PromotionsTab(QWidget):
                 )
                 return
 
-        # Проверяем ID других бонусных товаров в promo-строках
-        for i, (_, _, other_edit) in enumerate(self._promo_rows):
-            ids_text = other_edit.text().strip()
-            if ids_text:
-                parsed = parse_product_external_ids_csv(ids_text)
-                if parsed:
-                    miss = missing_product_external_ids(self._conn, parsed)
-                    if miss:
-                        QMessageBox.warning(
-                            self,
-                            f"Бонусные товары (акция {i + 1})",
-                            "Нет товаров с такими внешними ID:\n" + ", ".join(miss),
-                        )
-                        return
+        # Проверяем ID бонусных товаров в таблице бонусов
+        for row in range(self._bonus_table.rowCount()):
+            for col in (2, 4):  # «Конкретный» и «На выбор»
+                it = self._bonus_table.item(row, col)
+                ids_text = it.text().strip() if it else ""
+                if ids_text:
+                    parsed = parse_product_external_ids_csv(ids_text)
+                    if parsed:
+                        miss = missing_product_external_ids(self._conn, parsed)
+                        if miss:
+                            col_name = "Конкретный" if col == 2 else "На выбор"
+                            QMessageBox.warning(
+                                self,
+                                f"Бонусные товары (строка {row + 1}, {col_name})",
+                                "Нет товаров с такими артикулами:\n" + ", ".join(miss),
+                            )
+                            return
 
         mr = self._collect_matrix_rules()
         mr_json = json.dumps(mr, ensure_ascii=False) if mr else ""

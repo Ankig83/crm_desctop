@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -16,7 +18,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from crm_desktop.repositories import audit, products
+from crm_desktop.repositories import audit, products, promotions
+from crm_desktop.utils.dates import format_dmY, parse_iso
 
 
 # Колонки: 0=id (скрыта), далее — все поля продукта
@@ -69,6 +72,7 @@ class ProductsTab(QWidget):
         self._table.setColumnWidth(_COL_BARCODE, 140)
         self._table.setColumnWidth(_COL_BOX_DIM, 120)
         self._table.cellChanged.connect(self._on_cell_changed)
+        self._table.currentItemChanged.connect(self._on_selection_changed)
 
         btn_add = QPushButton("Добавить товар")
         btn_add.clicked.connect(self._add_row)
@@ -80,6 +84,19 @@ class ProductsTab(QWidget):
         self._search.setClearButtonEnabled(True)
         self._search.textChanged.connect(self._apply_filter)
 
+        # ── Панель «Акция для товара» ────────────────────────
+        self._promo_frame = QFrame()
+        self._promo_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        self._promo_frame.setStyleSheet(
+            "QFrame { background: #EBF5FB; border: 1px solid #AED6F1; border-radius: 4px; }"
+        )
+        self._promo_label = QLabel("Выберите товар — здесь отобразятся его акции и скидки.")
+        self._promo_label.setWordWrap(True)
+        self._promo_label.setContentsMargins(8, 6, 8, 6)
+        promo_frame_lay = QVBoxLayout(self._promo_frame)
+        promo_frame_lay.setContentsMargins(0, 0, 0, 0)
+        promo_frame_lay.addWidget(self._promo_label)
+
         top_row = QHBoxLayout()
         top_row.addWidget(btn_add)
         top_row.addWidget(btn_del)
@@ -89,6 +106,7 @@ class ProductsTab(QWidget):
         lay.addLayout(top_row)
         lay.addWidget(self._search)
         lay.addWidget(self._table)
+        lay.addWidget(self._promo_frame)
         self.reload()
 
     def _apply_filter(self) -> None:
@@ -233,3 +251,119 @@ class ProductsTab(QWidget):
         products.delete(self._conn, pid)
         audit.log(self._conn, "delete", "product", str(pid))
         self.reload()
+
+    # ── Панель акции ─────────────────────────────────────────
+
+    def _on_selection_changed(self) -> None:
+        r = self._table.currentRow()
+        if r < 0:
+            self._promo_label.setText("Выберите товар — здесь отобразятся его акции и скидки.")
+            return
+        pid = self._row_pid(r)
+        if pid is None:
+            return
+        self._show_promo_info(pid)
+
+    def _show_promo_info(self, pid: int) -> None:
+        promo = promotions.get_for_product(self._conn, pid)
+        if not promo:
+            self._promo_label.setText("Для этого товара акций не настроено.")
+            return
+
+        lines = []
+
+        # Базовая скидка и период
+        d1 = parse_iso(promo.valid_from_iso)
+        d2 = parse_iso(promo.valid_to_iso)
+        period = f"{format_dmY(d1)} — {format_dmY(d2)}" if d1 and d2 else "период не задан"
+        if promo.discount_percent and float(promo.discount_percent) > 0:
+            lines.append(f"Скидка: {promo.discount_percent}%  |  Период: {period}")
+        else:
+            lines.append(f"Период: {period}")
+
+        # matrix_rules
+        mr: dict = {}
+        if promo.matrix_rules_json:
+            try:
+                mr = json.loads(promo.matrix_rules_json)
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Продуктовая скидка
+        epct = float(mr.get("expiry_pct", 0) or 0)
+        erub = float(mr.get("expiry_rub", 0) or 0)
+        if epct > 0 or erub > 0:
+            parts = []
+            if epct > 0:
+                parts.append(f"{epct:.1f}%")
+            if erub > 0:
+                parts.append(f"{erub:.2f} руб")
+            lines.append("Доп. скидка на товар: " + " + ".join(parts))
+
+        # Предоплата
+        prepay_parts = []
+        for k, v in sorted(mr.items()):
+            if k.startswith("prepay_"):
+                try:
+                    thr = int(k.split("_")[1])
+                    prepay_parts.append(f"≥{thr}% → −{v}%")
+                except (ValueError, IndexError):
+                    pass
+        if prepay_parts:
+            lines.append("Предоплата: " + ", ".join(prepay_parts))
+
+        # Объём
+        vol_parts = []
+        for k, v in sorted(mr.items()):
+            if k.startswith("volume_"):
+                try:
+                    thr = int(k.split("_")[1])
+                    vol_parts.append(f"≥{thr} кор → −{v}%")
+                except (ValueError, IndexError):
+                    pass
+        if vol_parts:
+            lines.append("Скидка за объём: " + ", ".join(vol_parts))
+
+        # Бонусные правила (новый формат)
+        if "bonus_rules" in mr:
+            try:
+                bonus_list = json.loads(str(mr["bonus_rules"]))
+                for rule in bonus_list:
+                    thr = rule.get("threshold", 0)
+                    same = int(rule.get("same_qty", 0))
+                    fid  = str(rule.get("fixed_id", "")).strip()
+                    fqty = int(rule.get("fixed_qty", 1))
+                    cids = str(rule.get("choice_ids", "")).strip()
+                    bonus_parts = []
+                    if same > 0:
+                        bonus_parts.append(f"+{same} кор того же")
+                    if fid:
+                        bonus_parts.append(f"+{fqty} кор [{fid}] (фикс.)")
+                    if cids:
+                        bonus_parts.append(f"+1 на выбор из [{cids}]")
+                    if bonus_parts:
+                        lines.append(f"Бонус при ≥{thr} кор: " + "; ".join(bonus_parts))
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            # Старый формат promo_*_qty
+            bonus_names = sorted(
+                k[len("promo_"):-len("_qty")]
+                for k in mr if k.startswith("promo_") and k.endswith("_qty")
+            )
+            for name in bonus_names:
+                try:
+                    thr = name.split("_")[0]
+                    same = int(float(mr.get(f"promo_{name}_qty", 0) or 0))
+                    ids  = str(mr.get(f"promo_{name}_ids", "") or "")
+                    bonus_parts = []
+                    if same > 0:
+                        bonus_parts.append(f"+{same} кор того же")
+                    if ids:
+                        bonus_parts.append(f"+1 на выбор из [{ids}]")
+                    if bonus_parts:
+                        lines.append(f"Бонус при ≥{thr} кор: " + "; ".join(bonus_parts))
+                except Exception:  # noqa: BLE001
+                    pass
+
+        self._promo_label.setText("  |  ".join(lines) if lines else "Акция задана, но правила пусты.")
