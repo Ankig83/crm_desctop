@@ -33,6 +33,12 @@ from crm_desktop.adapters.quote_pdf import export_quote_pdf
 from crm_desktop.adapters.rus_export import RusLine, export_rus_variant_a
 from crm_desktop.repositories import audit, calculation_sessions, clients, products, promotions, settings as settings_repo
 from crm_desktop.services import email_send
+from crm_desktop.services.bonus import (
+    BonusRule,
+    collect_bonus_thresholds,
+    find_best_threshold,
+    promo_bonus_active,
+)
 from crm_desktop.services.pricing import line_total
 from crm_desktop.utils.dates import iso, parse_dmY, parse_iso
 
@@ -353,73 +359,15 @@ class QuoteTab(QWidget):
         return it is not None and it.text() == "1"
 
     def _promo_active(self, matrix_rules: dict, qd: date_type) -> bool:
-        from_s = matrix_rules.get("promo_date_from", "")
-        to_s   = matrix_rules.get("promo_date_to", "")
-        try:
-            if from_s:
-                if qd < parse_iso(str(from_s)):
-                    return False
-            if to_s:
-                if qd > parse_iso(str(to_s)):
-                    return False
-        except Exception:  # noqa: BLE001
-            pass
-        return True
+        return promo_bonus_active(matrix_rules, qd)
 
-    def _collect_bonus_thresholds(
-        self, matrix_rules: dict
-    ) -> list[tuple[float, int, str, int, list[str]]]:
-        """[(threshold, same_qty, fixed_id, fixed_qty, choice_ids), ...]"""
-        from crm_desktop.utils.bonus_ids import parse_product_external_ids_csv
-
-        # Новый формат: bonus_rules JSON-массив
-        if "bonus_rules" in matrix_rules:
-            try:
-                rules = json.loads(str(matrix_rules["bonus_rules"]))
-                result = []
-                for rule in rules:
-                    threshold = float(rule.get("threshold", 0))
-                    if threshold <= 0:
-                        continue
-                    same_qty  = int(rule.get("same_qty", 0))
-                    fixed_id  = str(rule.get("fixed_id", "")).strip()
-                    fixed_qty = max(1, int(rule.get("fixed_qty", 1)))
-                    raw_choice = str(rule.get("choice_ids", "")).strip()
-                    choice_ids = parse_product_external_ids_csv(raw_choice) if raw_choice else []
-                    result.append((threshold, same_qty, fixed_id, fixed_qty, choice_ids))
-                return result
-            except Exception:  # noqa: BLE001
-                pass
-
-        # Старый формат: promo_N_M_qty ключи (обратная совместимость)
-        names: set[str] = set()
-        for key in matrix_rules:
-            if key.startswith("promo_") and key.endswith("_qty"):
-                names.add(key[len("promo_"):-len("_qty")])
-
-        result = []
-        for name in sorted(names):
-            try:
-                threshold = float(name.split("_")[0])
-                same_qty  = int(float(matrix_rules.get(f"promo_{name}_qty", 0) or 0))
-            except (ValueError, IndexError):
-                continue
-            other_ids: list[str] = []
-            raw_ids = matrix_rules.get(f"promo_{name}_ids", "")
-            if raw_ids:
-                other_ids = parse_product_external_ids_csv(str(raw_ids))
-            result.append((threshold, same_qty, "", 1, other_ids))
-        return result
+    def _collect_bonus_thresholds(self, matrix_rules: dict) -> list[BonusRule]:
+        return collect_bonus_thresholds(matrix_rules)
 
     def _find_best_threshold(
-        self, thresholds: list[tuple[float, int, str, int, list[str]]], qty: float
-    ) -> tuple[float, int, str, int, list[str]] | None:
-        best = None
-        for t in thresholds:
-            if qty >= t[0]:
-                if best is None or t[0] > best[0]:
-                    best = t
-        return best
+        self, thresholds: list[BonusRule], qty: float
+    ) -> BonusRule | None:
+        return find_best_threshold(thresholds, qty)
 
     def _remove_bonus_rows_after(self, main_row: int) -> None:
         while True:

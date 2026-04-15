@@ -10,6 +10,7 @@ from crm_desktop.repositories import products, promotions
 
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
     init_db(conn)
     return conn
 
@@ -38,5 +39,6 @@ def test_import_promotions_saves_unknown_columns_as_matrix_json(tmp_path: Path) 
     assert rep.errors == []
     row = promotions.get_for_product(conn, products.by_external_id(conn, "P-001").id)  # type: ignore[union-attr]
     assert row is not None
-    assert "предоплата -2%" in row.matrix_rules_json
+    # ключи хранятся в оригинальном регистре (не нормализованном)
+    assert "Предоплата -2%" in row.matrix_rules_json
     assert "15+2" in row.matrix_rules_json
