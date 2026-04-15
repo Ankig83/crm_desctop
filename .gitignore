@@ -38,6 +38,7 @@ _version_info.txt
 
 # Архивы с собранным EXE (не исходный код)
 dist.zip
+*.pdf
 dist.7z
 CRM_Desktop*.zip
 CRM_Desktop*.7z
