@@ -59,8 +59,6 @@ class PromotionsTab(QWidget):
 
         # — Базовые поля —
         self._product = QComboBox()
-        self._ptype = QLineEdit()
-        self._ptype.setPlaceholderText("Тип акции (по ТЗ)")
         self._disc = QLineEdit()
         self._disc.setPlaceholderText("Процент, например 10")
         self._disc.setToolTip("Базовая скидка в % для этой акции (поле promotions.discount_percent).")
@@ -79,7 +77,6 @@ class PromotionsTab(QWidget):
 
         basic_form = QFormLayout()
         basic_form.addRow("Товар:", self._product)
-        basic_form.addRow("Тип акции:", self._ptype)
         basic_form.addRow("Базовая скидка %:", self._disc)
         basic_form.addRow("ID товаров-бонусов:", self._bonus_ids)
         basic_form.addRow("Дата начала:", self._d1)
@@ -147,18 +144,19 @@ class PromotionsTab(QWidget):
             "независимо от условий предоплаты или объёма."
         )
         self._expiry_rub = QDoubleSpinBox()
-        self._expiry_rub.setRange(0, 999_999)
+        self._expiry_rub.setRange(0, 100)
         self._expiry_rub.setDecimals(2)
-        self._expiry_rub.setSuffix(" руб")
+        self._expiry_rub.setSuffix(" %")
         self._expiry_rub.setToolTip(
-            "Дополнительная скидка в рублях (expiry_rub). "
-            "Отражается в колонке «Доп. скидка (РУБ)*» файла RUS.xlsx."
+            "Скидка за срок годности в %. "
+            "Применяется к товарам с коротким сроком годности. "
+            "Отражается в колонке «Доп. скидка» файла RUS.xlsx."
         )
 
         gb_expiry = QGroupBox("Продуктовая скидка")
         expiry_form = QFormLayout(gb_expiry)
         expiry_form.addRow("Скидка %:", self._expiry_pct)
-        expiry_form.addRow("Доп. скидка руб:", self._expiry_rub)
+        expiry_form.addRow("Срок годности %:", self._expiry_rub)
 
         # ── QGroupBox: Акционные бонусы (динамическая таблица) ──
         gb_promo = QGroupBox("Акционные бонусы (купи → получи бесплатно)")

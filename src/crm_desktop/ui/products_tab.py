@@ -23,21 +23,21 @@ from crm_desktop.utils.dates import format_dmY, parse_iso
 
 
 # Колонки: 0=id (скрыта), далее — все поля продукта
+# Порядок: Артикул → Баркод → Наименование → Ед. → Цена шт → Шт в кор → Базовая цена (авто)
 _COL_EXT        = 1
-_COL_NAME       = 2
-_COL_PRICE      = 3
-_COL_BARCODE    = 4
-_COL_UNIT       = 5
+_COL_BARCODE    = 2
+_COL_NAME       = 3
+_COL_UNIT       = 4
+_COL_PIECE      = 5
 _COL_UNITS_BOX  = 6
-_COL_PIECE      = 7
+_COL_PRICE      = 7   # вычисляется автоматически: Цена шт × Шт в кор
 _COL_PALLET     = 8
 _COL_WEIGHT     = 9
 _COL_VOL        = 10
-# ← новые логистические
-_COL_BOX_ROW    = 11   # коробов в ряде
-_COL_ROWS_PAL   = 12   # рядов в паллете
-_COL_PAL_H      = 13   # высота с паллетой (мм)
-_COL_BOX_DIM    = 14   # размер короба д*ш*в
+_COL_BOX_ROW    = 11
+_COL_ROWS_PAL   = 12
+_COL_PAL_H      = 13
+_COL_BOX_DIM    = 14
 
 
 class ProductsTab(QWidget):
@@ -51,19 +51,19 @@ class ProductsTab(QWidget):
         self._table.setHorizontalHeaderLabels([
             "#",
             "Артикул",
-            "Наименование",
-            "Базовая цена\n(кор)",
             "Баркод коробки",
-            "Ед.",
-            "Шт в кор",
-            "Цена шт",
+            "Наименование",
+            "Ед. изм.",
+            "Цена за штуку",
+            "Штук в коробке",
+            "Базовая цена\n(кор, авто)",
             "Кор на паллете",
             "Брутто кг",
             "Объём м³",
-            "Кор в ряде",       # ← новое
-            "Рядов в пал.",     # ← новое
-            "Высота пал. мм",   # ← новое
-            "Размер короба\nд*ш*в",  # ← новое
+            "Кор в ряде",
+            "Рядов в пал.",
+            "Высота пал. мм",
+            "Размер короба\nд*ш*в",
         ])
         self._table.hideColumn(0)
         self._table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
@@ -122,6 +122,13 @@ class ProductsTab(QWidget):
             ext_txt  = ext_it.text().lower()  if ext_it  else ""
             self._table.setRowHidden(r, q not in name_txt and q not in ext_txt)
 
+    def _make_auto_item(self, value: str) -> QTableWidgetItem:
+        """Нередактируемая ячейка для автовычисляемых значений."""
+        it = QTableWidgetItem(value)
+        it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+        it.setForeground(Qt.GlobalColor.darkGray)
+        return it
+
     def reload(self) -> None:
         self._block = True
         self._table.setRowCount(0)
@@ -132,18 +139,20 @@ class ProductsTab(QWidget):
             id_it = QTableWidgetItem(str(p.id))
             id_it.setFlags(Qt.ItemFlag.ItemIsEnabled)
             self._table.setItem(r, 0, id_it)
-            # основные поля
+            # поля в новом порядке
             self._table.setItem(r, _COL_EXT,       QTableWidgetItem(p.external_id or ""))
-            self._table.setItem(r, _COL_NAME,      QTableWidgetItem(p.name))
-            self._table.setItem(r, _COL_PRICE,     QTableWidgetItem(str(p.base_price)))
             self._table.setItem(r, _COL_BARCODE,   QTableWidgetItem(p.box_barcode))
+            self._table.setItem(r, _COL_NAME,      QTableWidgetItem(p.name))
             self._table.setItem(r, _COL_UNIT,      QTableWidgetItem(p.unit or "кор"))
-            self._table.setItem(r, _COL_UNITS_BOX, QTableWidgetItem(str(p.units_per_box)))
             self._table.setItem(r, _COL_PIECE,     QTableWidgetItem(str(p.regular_piece_price)))
+            self._table.setItem(r, _COL_UNITS_BOX, QTableWidgetItem(str(p.units_per_box)))
+            # базовая цена коробки — автовычисление
+            auto_price = round(p.regular_piece_price * p.units_per_box, 2)
+            self._table.setItem(r, _COL_PRICE, self._make_auto_item(str(auto_price)))
+            # логистические поля
             self._table.setItem(r, _COL_PALLET,    QTableWidgetItem(str(p.boxes_per_pallet)))
             self._table.setItem(r, _COL_WEIGHT,    QTableWidgetItem(str(p.gross_weight_kg)))
             self._table.setItem(r, _COL_VOL,       QTableWidgetItem(str(p.volume_m3)))
-            # новые логистические поля
             self._table.setItem(r, _COL_BOX_ROW,   QTableWidgetItem(str(p.boxes_in_row)))
             self._table.setItem(r, _COL_ROWS_PAL,  QTableWidgetItem(str(p.rows_per_pallet)))
             self._table.setItem(r, _COL_PAL_H,     QTableWidgetItem(str(p.pallet_height_mm)))
@@ -190,18 +199,20 @@ class ProductsTab(QWidget):
     def _on_cell_changed(self, row: int, col: int) -> None:
         if self._block or col == 0:
             return
+        # Колонка цены — только для чтения, изменения игнорируем
+        if col == _COL_PRICE:
+            return
         pid = self._row_pid(row)
         if pid is None:
             return
 
         ext       = self._txt(row, _COL_EXT) or None
         name      = self._txt(row, _COL_NAME)
-        price     = self._float(row, _COL_PRICE, "Базовая цена")
         barcode   = self._txt(row, _COL_BARCODE)
         unit      = self._txt(row, _COL_UNIT) or "кор"
 
-        units_box = self._int(row, _COL_UNITS_BOX, "Шт в кор")
-        piece     = self._float(row, _COL_PIECE, "Цена шт")
+        units_box = self._int(row, _COL_UNITS_BOX, "Штук в коробке")
+        piece     = self._float(row, _COL_PIECE, "Цена за штуку")
         pallet    = self._float(row, _COL_PALLET, "Кор на паллете")
         weight    = self._float(row, _COL_WEIGHT, "Брутто кг")
         vol       = self._float(row, _COL_VOL, "Объём м³")
@@ -210,15 +221,23 @@ class ProductsTab(QWidget):
         pal_h     = self._int(row, _COL_PAL_H, "Высота паллеты мм")
         box_dim   = self._txt(row, _COL_BOX_DIM)
 
-        # Если хоть одно обязательное поле не распарсилось — не сохраняем
-        if any(v is None for v in (price, units_box, piece, pallet, weight, vol, box_row, rows_pal, pal_h)):
+        if any(v is None for v in (units_box, piece, pallet, weight, vol, box_row, rows_pal, pal_h)):
             return
+
+        # Базовая цена коробки вычисляется автоматически
+        auto_price = round((piece or 0.0) * (units_box or 0), 2)
+
+        # Обновляем отображение автовычисленной цены
+        if col in (_COL_PIECE, _COL_UNITS_BOX):
+            self._block = True
+            self._table.setItem(row, _COL_PRICE, self._make_auto_item(str(auto_price)))
+            self._block = False
 
         products.update(
             self._conn, pid,
             external_id=ext,
             name=name,
-            base_price=price,
+            base_price=auto_price,
             box_barcode=barcode,
             unit=unit,
             units_per_box=units_box,
@@ -297,8 +316,8 @@ class ProductsTab(QWidget):
             if epct > 0:
                 parts.append(f"{epct:.1f}%")
             if erub > 0:
-                parts.append(f"{erub:.2f} руб")
-            lines.append("Доп. скидка на товар: " + " + ".join(parts))
+                parts.append(f"срок годности {erub:.1f}%")
+            lines.append("Продуктовая скидка: " + " + ".join(parts))
 
         # Предоплата
         prepay_parts = []

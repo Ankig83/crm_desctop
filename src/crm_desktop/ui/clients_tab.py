@@ -195,7 +195,7 @@ class ClientsTab(QWidget):
         form.addWidget(gb_type)           # ← тип клиента сверху, хорошо заметен
         form.addWidget(QLabel("ID (внешний)"))
         form.addWidget(self._ext)
-        form.addWidget(QLabel("Название"))
+        form.addWidget(QLabel("Название компании"))
         form.addWidget(self._name)
         form.addWidget(QLabel("ИНН"))
         form.addWidget(self._inn)
@@ -207,7 +207,7 @@ class ClientsTab(QWidget):
         form.addWidget(self._city_region_zip)
         form.addWidget(QLabel("Контакты (телефоны и др.)"))
         form.addWidget(self._contacts)
-        form.addWidget(QLabel("Адреса"))
+        form.addWidget(QLabel("Адрес"))
         form.addWidget(self._addresses)
         form.addWidget(QLabel("Пункты разгрузки"))
         form.addWidget(self._unload)
