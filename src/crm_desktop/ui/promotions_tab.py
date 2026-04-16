@@ -555,7 +555,6 @@ class PromotionsTab(QWidget):
             return
         pr = promotions.get_for_product(self._conn, product_id)
         if pr:
-            self._ptype.setText(pr.promo_type)
             self._disc.setText(str(pr.discount_percent))
             self._bonus_ids.setText(pr.bonus_other_product_ids.replace(",", ", "))
             d1 = parse_iso(pr.valid_from_iso)
@@ -573,7 +572,6 @@ class PromotionsTab(QWidget):
                     pass
             self._load_matrix_rules(mr)
         else:
-            self._ptype.clear()
             self._disc.clear()
             self._bonus_ids.clear()
             self._d1.setDate(QDate.currentDate())
@@ -643,7 +641,7 @@ class PromotionsTab(QWidget):
         promotions.upsert(
             self._conn,
             product_id,
-            promo_type=self._ptype.text().strip(),
+            promo_type="",
             discount_percent=disc,
             valid_from_iso=iso(d1),
             valid_to_iso=iso(d2),
@@ -684,7 +682,6 @@ class PromotionsTab(QWidget):
         self._fill_product_combo(None)
         if self._product.count():
             self._product.setCurrentIndex(0)
-        self._ptype.clear()
         self._disc.clear()
         self._bonus_ids.clear()
         self._d1.setDate(QDate.currentDate())
