@@ -4,16 +4,15 @@ import sqlite3
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
-    QLabel,
     QMainWindow,
     QMessageBox,
-    QScrollArea,
     QTabWidget,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -243,124 +242,38 @@ class MainWindow(QMainWindow):
 
 
 class _GuideDialog(QDialog):
-    """Диалог с прокручиваемым текстом руководства пользователя."""
+    """Диалог со справкой — рендерит Markdown через встроенный Qt-движок."""
 
     def __init__(self, markdown_text: str, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Руководство пользователя")
-        self.resize(820, 620)
+        self.resize(900, 680)
 
-        # Конвертируем Markdown в простой читаемый HTML
-        html = _md_to_simple_html(markdown_text)
-
-        label = QLabel()
-        label.setTextFormat(Qt.TextFormat.RichText)
-        label.setText(html)
-        label.setWordWrap(True)
-        label.setOpenExternalLinks(False)
-        label.setContentsMargins(12, 8, 12, 8)
-
-        scroll = QScrollArea()
-        scroll.setWidget(label)
-        scroll.setWidgetResizable(True)
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(False)
+        font = QFont("Segoe UI", 10)
+        browser.setFont(font)
+        browser.setMarkdown(markdown_text)
+        browser.setReadOnly(True)
+        browser.document().setDefaultStyleSheet(
+            "h1 { color: #1F3864; }"
+            "h2 { color: #1F3864; border-bottom: 1px solid #BDD7EE; padding-bottom: 4px; }"
+            "h3 { color: #2E75B6; }"
+            "h4, h5 { color: #2E75B6; }"
+            "table { border-collapse: collapse; margin: 6px 0; }"
+            "th { background: #D9E1F2; padding: 4px 8px; border: 1px solid #ADB9CA; }"
+            "td { padding: 4px 8px; border: 1px solid #D0D0D0; }"
+            "blockquote { border-left: 4px solid #BDD7EE; margin: 4px 0;"
+            "             padding: 4px 12px; background: #EBF5FB; color: #444; }"
+            "code { background: #F0F0F0; padding: 1px 4px; font-family: Consolas, monospace; }"
+            "pre  { background: #F5F5F5; padding: 8px; font-family: Consolas, monospace;"
+            "       font-size: 12px; }"
+            "li { margin: 2px 0; }"
+        )
 
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         btns.rejected.connect(self.reject)
 
         lay = QVBoxLayout(self)
-        lay.addWidget(scroll)
+        lay.addWidget(browser)
         lay.addWidget(btns)
-
-
-def _md_to_simple_html(md: str) -> str:
-    """Минимальный конвертер Markdown → HTML для отображения в QLabel."""
-    import html as _html
-    lines = md.split("\n")
-    result: list[str] = []
-    in_table = False
-    in_code = False
-
-    for line in lines:
-        # Блок кода
-        if line.startswith("```"):
-            if in_code:
-                result.append("</pre>")
-                in_code = False
-            else:
-                result.append("<pre style='background:#f5f5f5;padding:8px;"
-                              "border-radius:4px;font-family:Consolas,monospace;"
-                              "font-size:12px;'>")
-                in_code = True
-            continue
-        if in_code:
-            result.append(_html.escape(line))
-            continue
-
-        # Разделитель таблицы (строка из |---|)
-        if line.strip().startswith("|") and set(line.replace("|", "").replace(" ", "")) <= set("-:"):
-            continue
-
-        # Строка таблицы
-        if line.strip().startswith("|") and line.strip().endswith("|"):
-            cells = [c.strip() for c in line.strip()[1:-1].split("|")]
-            if not in_table:
-                result.append("<table border='1' cellpadding='5' cellspacing='0' "
-                              "style='border-collapse:collapse;margin:8px 0;"
-                              "font-size:13px;'>")
-                in_table = True
-                # первая строка = заголовок
-                result.append("<tr style='background:#D9E1F2;'>" +
-                               "".join(f"<th>{_html.escape(c)}</th>" for c in cells) +
-                               "</tr>")
-            else:
-                result.append("<tr>" +
-                               "".join(f"<td>{_html.escape(c)}</td>" for c in cells) +
-                               "</tr>")
-            continue
-        else:
-            if in_table:
-                result.append("</table>")
-                in_table = False
-
-        # Горизонтальная линия
-        if line.strip() in ("---", "***", "___"):
-            result.append("<hr/>")
-            continue
-
-        escaped = _html.escape(line)
-        # Inline code
-        import re
-        escaped = re.sub(r"`([^`]+)`",
-                         r"<code style='background:#f0f0f0;padding:1px 4px;"
-                         r"border-radius:3px;font-family:Consolas;'>\1</code>",
-                         escaped)
-        # Bold
-        escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
-        # Italic
-        escaped = re.sub(r"\*(.+?)\*", r"<i>\1</i>", escaped)
-
-        # Заголовки
-        if escaped.startswith("### "):
-            result.append(f"<h3 style='margin:10px 0 4px;color:#1F3864;'>{escaped[4:]}</h3>")
-        elif escaped.startswith("## "):
-            result.append(f"<h2 style='margin:14px 0 6px;color:#1F3864;"
-                          f"border-bottom:2px solid #BDD7EE;padding-bottom:4px;'>{escaped[3:]}</h2>")
-        elif escaped.startswith("# "):
-            result.append(f"<h1 style='color:#1F3864;'>{escaped[2:]}</h1>")
-        elif escaped.startswith("&gt; "):
-            result.append(f"<blockquote style='border-left:4px solid #BDD7EE;"
-                          f"margin:4px 0;padding:4px 12px;background:#EBF5FB;"
-                          f"color:#555;'>{escaped[5:]}</blockquote>")
-        elif escaped.startswith("- ") or escaped.startswith("* "):
-            result.append(f"<li style='margin:2px 0;'>{escaped[2:]}</li>")
-        elif escaped.strip() == "":
-            result.append("<br/>")
-        else:
-            result.append(f"<p style='margin:3px 0;'>{escaped}</p>")
-
-    if in_table:
-        result.append("</table>")
-    if in_code:
-        result.append("</pre>")
-
-    return "".join(result)
