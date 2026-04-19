@@ -43,12 +43,16 @@ from crm_desktop.services.pricing import line_total
 from crm_desktop.utils.dates import iso, parse_dmY, parse_iso
 
 # ── Индексы колонок таблицы ───────────────────────────────────
-_C_PID   = 0   # скрытый product_id
-_C_NAME  = 1   # название (QComboBox или QLabel для бонуса)
-_C_PRICE = 2   # цена
-_C_QTY   = 3   # количество
-_C_SUM   = 4   # сумма
-_C_BONUS = 5   # скрытый флаг: "1" = бонусная строка
+_C_PID       = 0   # скрытый product_id
+_C_NAME      = 1   # название (QComboBox или QLabel для бонуса)
+_C_QTY       = 2   # количество коробок
+_C_UPB       = 3   # штук в коробке (из товара)
+_C_PIECE     = 4   # базовая цена за штуку
+_C_PIECE_NET = 5   # итоговая цена за штуку (со скидкой)
+_C_BOX       = 6   # базовая цена за коробку
+_C_BOX_NET   = 7   # итоговая цена за коробку (со скидкой)
+_C_SUM       = 8   # сумма строки
+_C_BONUS     = 9   # скрытый флаг: "1" = бонусная строка
 
 _BONUS_BG = "#FFF2CC"
 
@@ -156,12 +160,23 @@ class QuoteTab(QWidget):
 
         # ── Таблица ───────────────────────────────────────────
         self._table = QTableWidget()
-        self._table.setColumnCount(6)
-        self._table.setHorizontalHeaderLabels(
-            ["ID", "Товар", "Цена", "Кол-во", "Сумма", "_bonus"]
-        )
+        self._table.setColumnCount(10)
+        self._table.setHorizontalHeaderLabels([
+            "ID", "Товар", "Кол-во\n(кор)", "Шт\nв кор",
+            "Цена\nза шт", "Итог\nза шт",
+            "Цена\nза кор", "Итог\nза кор",
+            "Сумма", "_bonus",
+        ])
         self._table.hideColumn(_C_PID)
         self._table.hideColumn(_C_BONUS)
+        self._table.setColumnWidth(_C_NAME, 200)
+        self._table.setColumnWidth(_C_QTY, 65)
+        self._table.setColumnWidth(_C_UPB, 55)
+        self._table.setColumnWidth(_C_PIECE, 80)
+        self._table.setColumnWidth(_C_PIECE_NET, 80)
+        self._table.setColumnWidth(_C_BOX, 90)
+        self._table.setColumnWidth(_C_BOX_NET, 90)
+        self._table.setColumnWidth(_C_SUM, 90)
         self._table.cellChanged.connect(self._on_changed)
 
         self._total = QLabel("0.00")
@@ -170,6 +185,7 @@ class QuoteTab(QWidget):
         self._total_with_prepay.setStyleSheet("color: #1a5276; font-style: italic;")
 
         # ── Кнопки ───────────────────────────────────────────
+        btn_new_calc     = QPushButton("Новый расчёт")
         btn_line         = QPushButton("+ Добавить товар")
         btn_del          = QPushButton("Удалить строку")
         btn_calc         = QPushButton("Пересчитать")
@@ -179,6 +195,17 @@ class QuoteTab(QWidget):
         btn_save_session = QPushButton("Сохранить в историю")
         btn_mail         = QPushButton("Отправить на e-mail…")
 
+        btn_new_calc.setStyleSheet(
+            "QPushButton { background:#C0392B; color:white; font-weight:bold;"
+            " padding:4px 12px; border-radius:4px; }"
+            "QPushButton:hover { background:#E74C3C; }"
+        )
+        btn_new_calc.setToolTip(
+            "Очистить все строки расчёта и начать новый заказ.\n"
+            "Клиент, даты и номер заказа сохраняются."
+        )
+
+        btn_new_calc.clicked.connect(self._new_calc)
         btn_line.clicked.connect(self._add_line)
         btn_del.clicked.connect(self._del_line)
         btn_calc.clicked.connect(self._recalc)
@@ -189,7 +216,7 @@ class QuoteTab(QWidget):
         btn_mail.clicked.connect(self._send_mail)
 
         btn_row = QHBoxLayout()
-        for b in (btn_line, btn_del, btn_calc, btn_export, btn_export_pdf,
+        for b in (btn_new_calc, btn_line, btn_del, btn_calc, btn_export, btn_export_pdf,
                   btn_export_rus, btn_save_session, btn_mail):
             btn_row.addWidget(b)
         btn_row.addStretch()
@@ -396,13 +423,18 @@ class QuoteTab(QWidget):
             it = QTableWidgetItem(val)
             it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
             it.setBackground(Qt.GlobalColor.yellow)
+            it.setForeground(Qt.GlobalColor.black)
             return it
 
-        self._table.setItem(ins, _C_PID,   _bi(str(getattr(p, "id", ""))))
-        self._table.setItem(ins, _C_PRICE, _bi("0"))
-        self._table.setItem(ins, _C_QTY,   _bi(str(qty)))
-        self._table.setItem(ins, _C_SUM,   _bi("0"))
-        self._table.setItem(ins, _C_BONUS, _bi("1"))
+        self._table.setItem(ins, _C_PID,       _bi(str(getattr(p, "id", ""))))
+        self._table.setItem(ins, _C_QTY,       _bi(str(qty)))
+        self._table.setItem(ins, _C_UPB,       _bi(""))
+        self._table.setItem(ins, _C_PIECE,     _bi(""))
+        self._table.setItem(ins, _C_PIECE_NET, _bi(""))
+        self._table.setItem(ins, _C_BOX,       _bi(""))
+        self._table.setItem(ins, _C_BOX_NET,   _bi(""))
+        self._table.setItem(ins, _C_SUM,       _bi("0"))
+        self._table.setItem(ins, _C_BONUS,     _bi("1"))
         return ins
 
     def _ask_bonus_choice(self, other_ids: list[str]) -> str | None:
@@ -419,6 +451,28 @@ class QuoteTab(QWidget):
     # Таблица
     # ─────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _effective_price(p) -> float:
+        """Фактическая цена коробки: штук × цена за штуку (консистентно с вкладкой Товары)."""
+        if p.regular_piece_price > 0 and p.units_per_box > 0:
+            return round(p.regular_piece_price * p.units_per_box, 2)
+        return p.base_price
+
+    def _new_calc(self) -> None:
+        """Очищает все строки расчёта и начинает новый заказ."""
+        if self._table.rowCount() > 0:
+            if QMessageBox.question(
+                self, "Новый расчёт",
+                "Очистить текущий расчёт и начать новый?"
+            ) != QMessageBox.StandardButton.Yes:
+                return
+        self._block = True
+        self._bonus_choices.clear()
+        self._table.setRowCount(0)
+        self._prepay.setValue(0)
+        self._block = False
+        self._add_line()
+
     def _add_line(self) -> None:
         self._block = True
         r = self._table.rowCount()
@@ -428,11 +482,15 @@ class QuoteTab(QWidget):
             combo.addItem(p.name, p.id)
         self._table.setCellWidget(r, _C_NAME, combo)
         combo.currentIndexChanged.connect(lambda *_: self._recalc())
-        self._table.setItem(r, _C_PID,   QTableWidgetItem(""))
-        self._table.setItem(r, _C_PRICE, QTableWidgetItem("0"))
-        self._table.setItem(r, _C_QTY,   QTableWidgetItem("1"))
-        self._table.setItem(r, _C_SUM,   QTableWidgetItem("0"))
-        self._table.setItem(r, _C_BONUS, QTableWidgetItem(""))
+        self._table.setItem(r, _C_PID,       QTableWidgetItem(""))
+        self._table.setItem(r, _C_QTY,       QTableWidgetItem("1"))
+        self._table.setItem(r, _C_UPB,       QTableWidgetItem(""))
+        self._table.setItem(r, _C_PIECE,     QTableWidgetItem(""))
+        self._table.setItem(r, _C_PIECE_NET, QTableWidgetItem(""))
+        self._table.setItem(r, _C_BOX,       QTableWidgetItem(""))
+        self._table.setItem(r, _C_BOX_NET,   QTableWidgetItem(""))
+        self._table.setItem(r, _C_SUM,       QTableWidgetItem("0"))
+        self._table.setItem(r, _C_BONUS,     QTableWidgetItem(""))
         self._sync_pid_for_row(r)
         self._block = False
         self._recalc()
@@ -448,9 +506,19 @@ class QuoteTab(QWidget):
         else:
             it.setText(str(pid or ""))
         p = products.get(self._conn, int(pid)) if pid is not None else None
-        pr = self._table.item(r, _C_PRICE)
-        if pr and p:
-            pr.setText(str(p.base_price))
+        if p:
+            ep = self._effective_price(p)
+            for col in (_C_UPB, _C_PIECE, _C_BOX):
+                it2 = self._table.item(r, col)
+                val = {
+                    _C_UPB:   str(p.units_per_box),
+                    _C_PIECE: str(p.regular_piece_price),
+                    _C_BOX:   str(ep),
+                }[col]
+                if it2:
+                    it2.setText(val)
+                else:
+                    self._table.setItem(r, col, QTableWidgetItem(val))
 
     def _del_line(self) -> None:
         r = self._table.currentRow()
@@ -513,6 +581,12 @@ class QuoteTab(QWidget):
         total_no_prepay   = 0.0
         total_with_prepay = 0.0
 
+        def _ro(val: str) -> QTableWidgetItem:
+            """Нередактируемая ячейка (read-only для расчётных значений)."""
+            it = QTableWidgetItem(val)
+            it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            return it
+
         r = 0
         while r < self._table.rowCount():
             if self._is_bonus_row(r):
@@ -538,6 +612,8 @@ class QuoteTab(QWidget):
             except ValueError:
                 qty = 0.0
 
+            ep = self._effective_price(p)   # реальная цена коробки (шт × цена)
+
             promo = promotions.get_for_product(self._conn, p.id)
             vf    = parse_iso(promo.valid_from_iso) if promo else None
             vt    = parse_iso(promo.valid_to_iso)   if promo else None
@@ -546,29 +622,43 @@ class QuoteTab(QWidget):
 
             # ── Все скидки для этого товара ──────────────────
             prepay_disc  = self._prepay_discount_for(matrix_rules)
-            volume_disc  = self._volume_discount_for(matrix_rules, total_boxes)  # ← Этап 2
-            product_disc = self._product_discount_for(matrix_rules)              # ← Этап 3
+            volume_disc  = self._volume_discount_for(matrix_rules, total_boxes)
+            product_disc = self._product_discount_for(matrix_rules)
 
             sub_no_prepay = line_total(
-                p.base_price, qty, disc, qd, vf, vt,
+                ep, qty, disc, qd, vf, vt,
                 client_type_pct=client_pct,
                 prepay_pct=0.0,
             )
             sub_full = line_total(
-                p.base_price, qty, disc, qd, vf, vt,
+                ep, qty, disc, qd, vf, vt,
                 client_type_pct=client_pct,
                 prepay_pct=prepay_disc,
                 volume_pct=volume_disc,
                 product_pct=product_disc,
             )
 
+            # ── Floor price («Не ниже %») ─────────────────────
+            floor_pct = float(matrix_rules.get("price_floor_pct", 0) or 0)
+            if floor_pct > 0 and qty > 0:
+                floor_total = ep * qty * floor_pct / 100
+                if sub_full < floor_total:
+                    sub_full = round(floor_total, 2)
+
             total_no_prepay   += sub_no_prepay
             total_with_prepay += sub_full
 
-            if s := self._table.item(r, _C_SUM):
-                s.setText(f"{sub_full:.2f}")
-            if pr := self._table.item(r, _C_PRICE):
-                pr.setText(str(p.base_price))
+            # ── Расчётные цены ────────────────────────────────
+            net_box   = round(sub_full / qty, 2) if qty > 0 else ep
+            net_piece = round(net_box / p.units_per_box, 4) if p.units_per_box > 0 else net_box
+
+            # ── Обновляем ячейки строки ───────────────────────
+            self._table.setItem(r, _C_UPB,       _ro(str(p.units_per_box)))
+            self._table.setItem(r, _C_PIECE,     _ro(str(p.regular_piece_price)))
+            self._table.setItem(r, _C_PIECE_NET, _ro(f"{net_piece:.4f}"))
+            self._table.setItem(r, _C_BOX,       _ro(str(ep)))
+            self._table.setItem(r, _C_BOX_NET,   _ro(f"{net_box:.2f}"))
+            self._table.setItem(r, _C_SUM,       _ro(f"{sub_full:.2f}"))
 
             # ── Бонусные строки ───────────────────────────────
             self._remove_bonus_rows_after(r)
@@ -613,7 +703,7 @@ class QuoteTab(QWidget):
                             if bp:
                                 self._add_bonus_row(
                                     ins, bp, 1,
-                                    f"  (бонус на выбор)"
+                                    "  (бонус на выбор)"
                                 )
 
             r += 1
@@ -675,11 +765,17 @@ class QuoteTab(QWidget):
             vd    = self._volume_discount_for(mr, total_boxes)
             prd   = self._product_discount_for(mr)
 
+            ep = self._effective_price(p)
             sub = line_total(
-                p.base_price, qty, disc, qd, vf, vt,
+                ep, qty, disc, qd, vf, vt,
                 client_type_pct=client_pct,
                 prepay_pct=pd, volume_pct=vd, product_pct=prd,
             )
+            floor_pct = float(mr.get("price_floor_pct", 0) or 0)
+            if floor_pct > 0 and qty > 0:
+                floor_total = ep * qty * floor_pct / 100
+                if sub < floor_total:
+                    sub = round(floor_total, 2)
             grand += sub
             discounts = []
             if pd > 0:  discounts.append(f"предоплата −{pd:.0f}%")
@@ -743,16 +839,22 @@ class QuoteTab(QWidget):
             vd    = self._volume_discount_for(mr, total_boxes)
             prd   = self._product_discount_for(mr)
             applied = disc if (vf and vt and vf <= qd <= vt and disc > 0) else 0.0
+            ep = self._effective_price(p)
             sub = line_total(
-                p.base_price, qty, disc, qd, vf, vt,
+                ep, qty, disc, qd, vf, vt,
                 client_type_pct=client_pct,
                 prepay_pct=pd, volume_pct=vd, product_pct=prd,
             )
+            floor_pct = float(mr.get("price_floor_pct", 0) or 0)
+            if floor_pct > 0 and qty > 0:
+                floor_total = ep * qty * floor_pct / 100
+                if sub < floor_total:
+                    sub = round(floor_total, 2)
             total += sub
             payload.append(calculation_sessions.SessionLine(
                 product_id=p.id,
                 product_external_id=p.external_id or "",
-                product_name=p.name, qty=qty, base_price=p.base_price,
+                product_name=p.name, qty=qty, base_price=ep,
                 discount_percent=applied + client_pct + pd + vd + prd,
                 line_total=sub,
             ))
@@ -846,11 +948,17 @@ class QuoteTab(QWidget):
             promo_disc = disc if (vf and vt and vf <= qd <= vt and disc > 0) else 0.0
             total_disc = min(promo_disc + client_pct + pd + vd + prd, 100.0)
 
+            ep = self._effective_price(p)
             sub = line_total(
-                p.base_price, qty, disc, qd, vf, vt,
+                ep, qty, disc, qd, vf, vt,
                 client_type_pct=client_pct,
                 prepay_pct=pd, volume_pct=vd, product_pct=prd,
             )
+            floor_pct = float(mr.get("price_floor_pct", 0) or 0)
+            if floor_pct > 0 and qty > 0:
+                floor_total = ep * qty * floor_pct / 100
+                if sub < floor_total:
+                    sub = round(floor_total, 2)
 
             export_mr = dict(mr)
             if pd  > 0: export_mr["_applied_prepay_pct"]  = pd
@@ -862,10 +970,10 @@ class QuoteTab(QWidget):
                 box_barcode=p.box_barcode,
                 name=p.name, unit=p.unit or "кор",
                 qty=qty,
-                regular_price_per_box=p.base_price,
+                regular_price_per_box=ep,
                 regular_price_per_piece=(
                     p.regular_piece_price if p.regular_piece_price > 0
-                    else (p.base_price / p.units_per_box if p.units_per_box > 0 else 0.0)
+                    else (ep / p.units_per_box if p.units_per_box > 0 else 0.0)
                 ),
                 units_per_box=p.units_per_box,
                 boxes_per_pallet=p.boxes_per_pallet,
@@ -875,7 +983,7 @@ class QuoteTab(QWidget):
                 rows_per_pallet=getattr(p, "rows_per_pallet", 0),
                 pallet_height_mm=getattr(p, "pallet_height_mm", 0),
                 box_dimensions=getattr(p, "box_dimensions", ""),
-                base_price=p.base_price,
+                base_price=ep,
                 discount_percent=total_disc,
                 line_total=sub,
                 matrix_rules=export_mr,

@@ -75,12 +75,22 @@ class PromotionsTab(QWidget):
             d.setDisplayFormat("dd.MM.yyyy")
             d.setDate(QDate.currentDate())
 
+        self._no_d1 = QCheckBox("Бессрочно (без даты начала)")
+        self._no_d1.setToolTip("Акция действует с самого начала, без ограничения по дате старта.")
+        self._no_d1.toggled.connect(lambda v: self._d1.setEnabled(not v))
+
+        self._no_d2 = QCheckBox("Бессрочно (без даты окончания)")
+        self._no_d2.setToolTip("Акция действует бессрочно — без даты завершения.")
+        self._no_d2.toggled.connect(lambda v: self._d2.setEnabled(not v))
+
         basic_form = QFormLayout()
         basic_form.addRow("Товар:", self._product)
         basic_form.addRow("Базовая скидка %:", self._disc)
         basic_form.addRow("ID товаров-бонусов:", self._bonus_ids)
         basic_form.addRow("Дата начала:", self._d1)
+        basic_form.addRow("", self._no_d1)
         basic_form.addRow("Дата окончания:", self._d2)
+        basic_form.addRow("", self._no_d2)
 
         # ── QGroupBox: Скидка за предоплату ──────────────────
         self._prepay_table = QTableWidget(0, 2)
@@ -152,11 +162,22 @@ class PromotionsTab(QWidget):
             "Применяется к товарам с коротким сроком годности. "
             "Отражается в колонке «Доп. скидка» файла RUS.xlsx."
         )
+        self._floor_pct = QDoubleSpinBox()
+        self._floor_pct.setRange(0, 100)
+        self._floor_pct.setDecimals(1)
+        self._floor_pct.setSuffix(" %")
+        self._floor_pct.setToolTip(
+            "Минимальная цена в % от базовой цены товара.\n"
+            "Если после применения ВСЕХ скидок цена за штуку опускается ниже этого порога — "
+            "программа автоматически поднимает её до указанного минимума.\n"
+            "Пример: 80 → цена никогда не будет ниже 80% от базовой."
+        )
 
         gb_expiry = QGroupBox("Продуктовая скидка")
         expiry_form = QFormLayout(gb_expiry)
         expiry_form.addRow("Скидка %:", self._expiry_pct)
         expiry_form.addRow("Срок годности %:", self._expiry_rub)
+        expiry_form.addRow("Не ниже % от базовой:", self._floor_pct)
 
         # ── QGroupBox: Акционные бонусы (динамическая таблица) ──
         gb_promo = QGroupBox("Акционные бонусы (купи → получи бесплатно)")
@@ -330,10 +351,13 @@ class PromotionsTab(QWidget):
         # Продуктовая скидка
         epct = self._expiry_pct.value()
         erub = self._expiry_rub.value()
+        floor_pct = self._floor_pct.value()
         if epct > 0:
             mr["expiry_pct"] = epct
         if erub > 0:
             mr["expiry_rub"] = erub
+        if floor_pct > 0:
+            mr["price_floor_pct"] = floor_pct
 
         # Акционные бонусы → JSON-массив правил
         bonus_rules = []
@@ -418,6 +442,10 @@ class PromotionsTab(QWidget):
             self._expiry_rub.setValue(float(mr.get("expiry_rub", 0) or 0))
         except (ValueError, TypeError):
             self._expiry_rub.setValue(0.0)
+        try:
+            self._floor_pct.setValue(float(mr.get("price_floor_pct", 0) or 0))
+        except (ValueError, TypeError):
+            self._floor_pct.setValue(0.0)
 
         # Акционные бонусы — новый формат bonus_rules, fallback на старый promo_*_qty
         self._bonus_table.setRowCount(0)
@@ -485,6 +513,7 @@ class PromotionsTab(QWidget):
         self._volume_table.setRowCount(0)
         self._expiry_pct.setValue(0.0)
         self._expiry_rub.setValue(0.0)
+        self._floor_pct.setValue(0.0)
         self._bonus_table.setRowCount(0)
         self._promo_no_start.setChecked(True)
         self._promo_no_end.setChecked(True)
@@ -513,10 +542,11 @@ class PromotionsTab(QWidget):
         self._fill_product_combo(None)
         self._list.clear()
         for r in promotions.list_all(self._conn):
-            label = (
-                f"{r.product_name} — {r.discount_percent}% "
-                f"({format_dmY(parse_iso(r.valid_from_iso))}—{format_dmY(parse_iso(r.valid_to_iso))})"
-            )
+            d1 = parse_iso(r.valid_from_iso)
+            d2 = parse_iso(r.valid_to_iso)
+            from_s = "∞" if (d1 and d1.year <= 1)    else format_dmY(d1)
+            to_s   = "∞" if (d2 and d2.year >= 9999) else format_dmY(d2)
+            label  = f"{r.product_name} — {r.discount_percent}%  ({from_s}—{to_s})"
             it = QListWidgetItem(label)
             it.setData(Qt.ItemDataRole.UserRole, r.product_id)
             self._list.addItem(it)
@@ -559,8 +589,23 @@ class PromotionsTab(QWidget):
             self._bonus_ids.setText(pr.bonus_other_product_ids.replace(",", ", "))
             d1 = parse_iso(pr.valid_from_iso)
             d2 = parse_iso(pr.valid_to_iso)
-            self._d1.setDate(QDate(d1.year, d1.month, d1.day))
-            self._d2.setDate(QDate(d2.year, d2.month, d2.day))
+            # Sentinel «бессрочно»: год ≤ 1 = без даты начала, год ≥ 9999 = без окончания
+            if d1 and d1.year <= 1:
+                self._no_d1.setChecked(True)
+                self._d1.setEnabled(False)
+            else:
+                self._no_d1.setChecked(False)
+                self._d1.setEnabled(True)
+                if d1:
+                    self._d1.setDate(QDate(d1.year, d1.month, d1.day))
+            if d2 and d2.year >= 9999:
+                self._no_d2.setChecked(True)
+                self._d2.setEnabled(False)
+            else:
+                self._no_d2.setChecked(False)
+                self._d2.setEnabled(True)
+                if d2:
+                    self._d2.setDate(QDate(d2.year, d2.month, d2.day))
             # matrix_rules
             mr: dict = {}
             if pr.matrix_rules_json:
@@ -601,9 +646,20 @@ class PromotionsTab(QWidget):
         q2 = self._d2.date()
         d1 = parse_dmY(f"{q1.day():02d}.{q1.month():02d}.{q1.year():04d}")
         d2 = parse_dmY(f"{q2.day():02d}.{q2.month():02d}.{q2.year():04d}")
-        if d1 > d2:
-            QMessageBox.warning(self, "Период", "Дата начала не может быть позже окончания.")
-            return
+        # Бессрочность: используем sentinel-даты
+        if self._no_d1.isChecked():
+            d1 = parse_dmY("01.01.0001") or d1
+            valid_from = "0001-01-01"
+        else:
+            valid_from = iso(d1)
+        if self._no_d2.isChecked():
+            valid_to = "9999-12-31"
+        else:
+            valid_to = iso(d2)
+            d2_check = d2
+            if not self._no_d1.isChecked() and d1 > d2:
+                QMessageBox.warning(self, "Период", "Дата начала не может быть позже окончания.")
+                return
 
         bonus_norm = normalize_product_external_ids_csv(self._bonus_ids.text())
         parsed_bonus = parse_product_external_ids_csv(self._bonus_ids.text())
@@ -643,8 +699,8 @@ class PromotionsTab(QWidget):
             product_id,
             promo_type="",
             discount_percent=disc,
-            valid_from_iso=iso(d1),
-            valid_to_iso=iso(d2),
+            valid_from_iso=valid_from,
+            valid_to_iso=valid_to,
             bonus_other_product_ids=bonus_norm,
             matrix_rules_json=mr_json,
         )
@@ -660,10 +716,11 @@ class PromotionsTab(QWidget):
         self._loading = True
         self._list.clear()
         for r in promotions.list_all(self._conn):
-            label = (
-                f"{r.product_name} — {r.discount_percent}% "
-                f"({format_dmY(parse_iso(r.valid_from_iso))}—{format_dmY(parse_iso(r.valid_to_iso))})"
-            )
+            d1 = parse_iso(r.valid_from_iso)
+            d2 = parse_iso(r.valid_to_iso)
+            from_s = "∞" if (d1 and d1.year <= 1)    else format_dmY(d1)
+            to_s   = "∞" if (d2 and d2.year >= 9999) else format_dmY(d2)
+            label  = f"{r.product_name} — {r.discount_percent}%  ({from_s}—{to_s})"
             it = QListWidgetItem(label)
             it.setData(Qt.ItemDataRole.UserRole, r.product_id)
             self._list.addItem(it)
@@ -686,6 +743,10 @@ class PromotionsTab(QWidget):
         self._bonus_ids.clear()
         self._d1.setDate(QDate.currentDate())
         self._d2.setDate(QDate.currentDate())
+        self._no_d1.setChecked(False)
+        self._no_d2.setChecked(False)
+        self._d1.setEnabled(True)
+        self._d2.setEnabled(True)
         self._clear_matrix_rules_ui()
         self._loading = False
 
