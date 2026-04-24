@@ -235,7 +235,7 @@ def import_clients(conn: sqlite3.Connection, path: Path) -> ImportReport:
             rep.clients_rows += 1
         except Exception as e:  # noqa: BLE001
             rep.errors.append(f"Клиенты, строка {line_no}: {e}")
-    audit.log(conn, "import", "clients", str(path))
+    audit.log(conn, "import", "clients", str(path) if not hasattr(path, "read") else "<stream>")
     return rep
 
 
@@ -313,7 +313,7 @@ def import_products(conn: sqlite3.Connection, path: Path) -> ImportReport:
             rep.products_rows += 1
         except Exception as e:  # noqa: BLE001
             rep.errors.append(f"Товары, строка {line_no}: {e}")
-    audit.log(conn, "import", "products", str(path))
+    audit.log(conn, "import", "products", str(path) if not hasattr(path, "read") else "<stream>")
     return rep
 
 
@@ -400,7 +400,7 @@ def import_promotions(conn: sqlite3.Connection, path: Path) -> ImportReport:
             rep.promotions_rows += 1
         except Exception as e:
             rep.errors.append(f"Акции, строка {line_no}: {e}")
-    audit.log(conn, "import", "promotions", str(path))
+    audit.log(conn, "import", "promotions", str(path) if not hasattr(path, "read") else "<stream>")
     return rep
 
 
@@ -408,7 +408,17 @@ def import_promotions(conn: sqlite3.Connection, path: Path) -> ImportReport:
 # ЭКСПОРТ КЛИЕНТОВ
 # ─────────────────────────────────────────────────────────────
 
-def export_clients(conn: sqlite3.Connection, path: Path) -> None:
+def _wb_save(wb, path) -> None:
+    """Сохранить Workbook в Path или file-like объект."""
+    if hasattr(path, "write"):
+        wb.save(path)
+    else:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        wb.save(p)
+
+
+def export_clients(conn: sqlite3.Connection, path) -> None:
     wb = Workbook()
     ws = wb.active
     ws.title = "clients"
@@ -420,7 +430,7 @@ def export_clients(conn: sqlite3.Connection, path: Path) -> None:
         "Адрес грузополучателя", "Город/Штат/Почтовый индекс грузополучателя",
         "Телефон грузополучателя", "Электронная почта грузополучателя",
         "Новый (0/1)",
-        "Тип клиента",   # ← новое
+        "Тип клиента",
     ])
     for c in clients.list_all(conn):
         ws.append([
@@ -429,19 +439,18 @@ def export_clients(conn: sqlite3.Connection, path: Path) -> None:
             c.consignee_name, c.consignee_contact_person, c.consignee_address,
             c.consignee_city_region_zip, c.consignee_phone, c.consignee_email,
             1 if c.is_new else 0,
-            c.client_type_label,   # ← читаемое название: «Дистрибутор» и т.д.
+            c.client_type_label,
         ])
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(path)
-    audit.log(conn, "export", "clients", str(path))
+    _wb_save(wb, path)
+    if not hasattr(path, "write"):
+        audit.log(conn, "export", "clients", str(path))
 
 
 # ─────────────────────────────────────────────────────────────
 # ЭКСПОРТ ТОВАРОВ
 # ─────────────────────────────────────────────────────────────
 
-def export_products(conn: sqlite3.Connection, path: Path) -> None:
+def export_products(conn: sqlite3.Connection, path) -> None:
     wb = Workbook()
     ws = wb.active
     ws.title = "products"
@@ -450,10 +459,10 @@ def export_products(conn: sqlite3.Connection, path: Path) -> None:
         "Ед. измерения", "Количество в кор. (ШТ)",
         "Цена за штуку (РУБ), регулярная цена",
         "Количество на паллете (КОР)", "масса брутто, (КГ)", "объём, (м3)",
-        "Коробов в ряде",          # ← новое
-        "Рядов в паллете",         # ← новое
-        "Высота с паллетой (мм)",  # ← новое
-        "Размер короба д*ш*в",     # ← новое
+        "Коробов в ряде",
+        "Рядов в паллете",
+        "Высота с паллетой (мм)",
+        "Размер короба д*ш*в",
     ])
     for p in products.list_all(conn):
         ws.append([
@@ -463,10 +472,9 @@ def export_products(conn: sqlite3.Connection, path: Path) -> None:
             p.boxes_in_row, p.rows_per_pallet,
             p.pallet_height_mm, p.box_dimensions,
         ])
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(path)
-    audit.log(conn, "export", "products", str(path))
+    _wb_save(wb, path)
+    if not hasattr(path, "write"):
+        audit.log(conn, "export", "products", str(path))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -483,7 +491,7 @@ _MATRIX_KEYS_ORDER = [
 ]
 
 
-def export_promotions(conn: sqlite3.Connection, path: Path) -> None:
+def export_promotions(conn: sqlite3.Connection, path) -> None:
     all_promos = promotions.list_all(conn)
 
     # Собираем все уникальные ключи matrix_rules из всех записей
@@ -526,10 +534,9 @@ def export_promotions(conn: sqlite3.Connection, path: Path) -> None:
         ] + [mr.get(k, "") for k in extra_keys]
         ws.append(row)
 
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(path)
-    audit.log(conn, "export", "promotions", str(path))
+    _wb_save(wb, path)
+    if not hasattr(path, "write"):
+        audit.log(conn, "export", "promotions", str(path))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -550,7 +557,7 @@ _DISCOUNT_TYPE_PARSE: dict[str, str] = {
 }
 
 
-def export_global_discounts(conn: sqlite3.Connection, path: Path) -> None:
+def export_global_discounts(conn: sqlite3.Connection, path) -> None:
     """Экспортировать правила глобальных скидок (предоплата и объём) в Excel."""
     wb = Workbook()
     ws = wb.active
@@ -563,10 +570,9 @@ def export_global_discounts(conn: sqlite3.Connection, path: Path) -> None:
                 r.threshold,
                 r.discount_pct,
             ])
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(path)
-    audit.log(conn, "export", "global_discounts", str(path))
+    _wb_save(wb, path)
+    if not hasattr(path, "write"):
+        audit.log(conn, "export", "global_discounts", str(path))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -638,5 +644,5 @@ def import_global_discounts(conn: sqlite3.Connection, path: Path) -> ImportRepor
         if rules:  # Заменяем только те типы, для которых есть данные
             global_discounts.set_rules(conn, rule_type, rules)
 
-    audit.log(conn, "import", "global_discounts", str(path))
+    audit.log(conn, "import", "global_discounts", str(path) if not hasattr(path, "read") else "<stream>")
     return rep

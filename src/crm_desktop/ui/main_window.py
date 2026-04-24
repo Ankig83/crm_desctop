@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from crm_desktop.adapters import excel_io
 from crm_desktop.repositories import audit
 from crm_desktop.services.backup import copy_database_to
+from crm_desktop.services.update_package import apply_package, create_package
 from PySide6.QtWidgets import (
     QAbstractSpinBox, QCheckBox, QComboBox, QDateEdit,
     QLineEdit, QPlainTextEdit, QPushButton, QTableWidget,
@@ -140,23 +141,44 @@ class MainWindow(QMainWindow):
         m_file = bar.addMenu("Файл")
         is_admin = (role == "admin")
 
-        # ── Импорт (доступно всем) ────────────────────────────
+        # ── Пакет обновлений ─────────────────────────────────
+        if is_admin:
+            a_create_pkg = QAction("Создать пакет обновлений…", self)
+            a_create_pkg.setToolTip(
+                "Экспортировать товары, акции и скидки в подписанный файл .crmpack\n"
+                "для передачи менеджерам."
+            )
+            a_create_pkg.triggered.connect(self._create_update_package)
+            m_file.addAction(a_create_pkg)
+
+        a_apply_pkg = QAction("Применить обновление (.crmpack)…", self)
+        a_apply_pkg.setToolTip(
+            "Загрузить подписанный пакет обновлений от администратора.\n"
+            "Файлы без подписи будут отклонены."
+        )
+        a_apply_pkg.triggered.connect(self._apply_update_package)
+        m_file.addAction(a_apply_pkg)
+
+        m_file.addSeparator()
+
+        # ── Импорт ───────────────────────────────────────────
         m_import = m_file.addMenu("Импорт")
 
+        # Клиенты — разрешено всем (менеджеры сами добавляют клиентов)
         a_imp_c = QAction("Клиенты (Excel)…", self)
         a_imp_c.triggered.connect(self._imp_clients)
         m_import.addAction(a_imp_c)
 
-        a_imp_p = QAction("Товары (Excel)…", self)
-        a_imp_p.triggered.connect(self._imp_products)
-        m_import.addAction(a_imp_p)
-
-        a_imp_r = QAction("Акции (Excel)…", self)
-        a_imp_r.triggered.connect(self._imp_promo)
-        m_import.addAction(a_imp_r)
-
-        # Импорт скидок — только для администратора
+        # Товары / акции / скидки — только администратор
         if is_admin:
+            a_imp_p = QAction("Товары (Excel)…", self)
+            a_imp_p.triggered.connect(self._imp_products)
+            m_import.addAction(a_imp_p)
+
+            a_imp_r = QAction("Акции (Excel)…", self)
+            a_imp_r.triggered.connect(self._imp_promo)
+            m_import.addAction(a_imp_r)
+
             a_imp_d = QAction("Скидки (Excel)…", self)
             a_imp_d.triggered.connect(self._imp_discounts)
             m_import.addAction(a_imp_d)
@@ -292,6 +314,50 @@ class MainWindow(QMainWindow):
             return
         excel_io.export_global_discounts(self._conn, Path(path))
         QMessageBox.information(self, "Экспорт", "Готово.")
+
+    def _create_update_package(self) -> None:
+        """Администратор: создать подписанный пакет обновлений (.crmpack)."""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить пакет обновлений", "update.crmpack",
+            "Пакет обновлений CRM (*.crmpack)"
+        )
+        if not path:
+            return
+        try:
+            create_package(self._conn, Path(path), created_by=self._user_name or "admin")
+            QMessageBox.information(
+                self, "Пакет создан",
+                f"Пакет обновлений сохранён:\n{path}\n\n"
+                "Передайте этот файл менеджерам.\n"
+                "Они применят его через «Файл → Применить обновление»."
+            )
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Ошибка", f"Не удалось создать пакет:\n{e}")
+
+    def _apply_update_package(self) -> None:
+        """Применить подписанный пакет обновлений (.crmpack)."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Открыть пакет обновлений", "",
+            "Пакет обновлений CRM (*.crmpack)"
+        )
+        if not path:
+            return
+        result = apply_package(self._conn, Path(path))
+        if not result.ok:
+            QMessageBox.critical(
+                self, "Обновление отклонено",
+                result.message,
+            )
+            return
+        # Обновить все вкладки после применения
+        self._products.reload()
+        self._promotions.reload()
+        self._global_disc.reload()
+        self._quote.reload_clients()
+        if result.errors:
+            QMessageBox.warning(self, "Обновление применено с предупреждениями", result.message)
+        else:
+            QMessageBox.information(self, "Обновление применено", result.message)
 
     def _backup(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "Папка для копии базы")
