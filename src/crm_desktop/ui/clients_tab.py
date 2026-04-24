@@ -24,8 +24,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QColor
 
-from crm_desktop.repositories import audit, clients
-from crm_desktop.repositories.clients import CLIENT_TYPES, CLIENT_TYPE_DISCOUNT
+from crm_desktop.repositories import audit, client_types, clients
 from crm_desktop.utils.validation import inn_ok, normalize_inn
 
 
@@ -56,19 +55,13 @@ class ClientsTab(QWidget):
         self._inn = QLineEdit()
         self._inn.setPlaceholderText("10 или 12 цифр")
 
-        # ── Тип клиента ──────────────────────────────────────
+        # ── Тип клиента (динамически из БД) ─────────────────────
         self._client_type = QComboBox()
-        for key, label in CLIENT_TYPES.items():
-            disc = CLIENT_TYPE_DISCOUNT[key]
-            display = f"{label}  (−{disc:.0f}%)" if disc > 0 else label
-            self._client_type.addItem(display, key)
         self._client_type.setToolTip(
-            "Тип клиента определяет базовую скидку:\n"
-            "Торговая сеть — 15%\n"
-            "Дистрибутор  — 5%\n"
-            "Оптовик      — 2%\n"
-            "Обычный      — 0%"
+            "Тип клиента определяет базовую скидку при расчёте заказа.\n"
+            "Типы и скидки настраиваются администратором во вкладке «Типы клиентов»."
         )
+        self._reload_type_combo()
 
         self._contact_person = QLineEdit()
         self._contact_person.setPlaceholderText("ФИО контактного лица (покупатель)")
@@ -253,10 +246,25 @@ class ClientsTab(QWidget):
         lay.addWidget(split)
         self.reload()
 
+    # ── Перезагрузка списка типов клиентов из БД ──────────────
+    def _reload_type_combo(self) -> None:
+        saved_id = self._client_type.currentData()
+        self._client_type.blockSignals(True)
+        self._client_type.clear()
+        for ct in client_types.list_all(self._conn):
+            display = f"{ct.name}  (−{ct.discount_pct:.0f}%)" if ct.discount_pct > 0 else ct.name
+            self._client_type.addItem(display, ct.id)
+        # Восстанавливаем предыдущий выбор
+        if saved_id is not None:
+            idx = self._client_type.findData(saved_id)
+            if idx >= 0:
+                self._client_type.setCurrentIndex(idx)
+        self._client_type.blockSignals(False)
+
     # ── Подсказка под выпадающим списком типа ─────────────────
     def _update_type_hint(self) -> None:
-        key = self._client_type.currentData()
-        disc = CLIENT_TYPE_DISCOUNT.get(key, 0.0)
+        ct = client_types.get(self._conn, self._client_type.currentData() or 0)
+        disc = ct.discount_pct if ct else 0.0
         if disc > 0:
             self._type_hint.setText(f"Базовая скидка для этого типа: −{disc:.0f}% от цены")
         else:
@@ -313,8 +321,9 @@ class ClientsTab(QWidget):
         self._c_phone.setText(c.consignee_phone)
         self._c_email.setText(c.consignee_email)
         self._is_new.setChecked(c.is_new)
-        # тип клиента
-        idx = self._client_type.findData(c.client_type)
+        # тип клиента — ищем по client_type_id (int FK)
+        type_id = c.client_type_id
+        idx = self._client_type.findData(type_id) if type_id is not None else -1
         self._client_type.setCurrentIndex(idx if idx >= 0 else 0)
         self._loading = False
         self._update_type_hint()
@@ -367,7 +376,7 @@ class ClientsTab(QWidget):
             consignee_phone=self._c_phone.text().strip(),
             consignee_email=self._c_email.text().strip(),
             is_new=self._is_new.isChecked(),
-            client_type=self._client_type.currentData(),  # ← новое
+            client_type_id=self._client_type.currentData(),
         )
         # обновляем отображение в списке
         for i in range(self._list.count()):
@@ -410,7 +419,6 @@ class ClientsTab(QWidget):
                 consignee_phone="",
                 consignee_email="",
                 is_new=True,
-                client_type="regular",
             )
             audit.log(self._conn, "create", "client", str(nid))
             self._current_id = nid

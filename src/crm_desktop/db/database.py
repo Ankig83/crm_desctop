@@ -3,13 +3,33 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 7  # ← было 6
+SCHEMA_VERSION = 12  # ← было 11
 
 DDL = """
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version INTEGER PRIMARY KEY
+);
+
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  role TEXT NOT NULL DEFAULT 'manager',
+  password_hash TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS client_types (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  discount_pct REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE TABLE IF NOT EXISTS global_discount_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_type TEXT NOT NULL,
+  threshold REAL NOT NULL,
+  discount_pct REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS clients (
@@ -124,7 +144,12 @@ def init_db(conn: sqlite3.Connection) -> None:
     _migrate_v4(conn)
     _migrate_v5(conn)
     _migrate_v6(conn)
-    _migrate_v7(conn)  # ← новая
+    _migrate_v7(conn)
+    _migrate_v8(conn)
+    _migrate_v9(conn)
+    _migrate_v10(conn)
+    _migrate_v11(conn)
+    _migrate_v12(conn)
     row = conn.execute(
         "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
     ).fetchone()
@@ -211,3 +236,112 @@ def _migrate_v7(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "products", "rows_per_pallet INTEGER NOT NULL DEFAULT 0", "rows_per_pallet")
     _add_column_if_missing(conn, "products", "pallet_height_mm INTEGER NOT NULL DEFAULT 0", "pallet_height_mm")
     _add_column_if_missing(conn, "products", "box_dimensions TEXT NOT NULL DEFAULT ''", "box_dimensions")
+
+
+def _migrate_v8(conn: sqlite3.Connection) -> None:
+    """Пользователи: таблица users + дефолтный администратор."""
+    import hashlib
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL UNIQUE,
+          role TEXT NOT NULL DEFAULT 'manager',
+          password_hash TEXT NOT NULL DEFAULT ''
+        );
+    """)
+    existing = conn.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()[0]
+    if existing == 0:
+        ph = hashlib.sha256(b"admin1234").hexdigest()
+        conn.execute(
+            "INSERT OR IGNORE INTO users(name, role, password_hash) VALUES (?, ?, ?)",
+            ("Администратор", "admin", ph),
+        )
+    conn.commit()
+
+
+def _migrate_v9(conn: sqlite3.Connection) -> None:
+    """Типы клиентов и глобальные скидки."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS client_types (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL UNIQUE,
+          discount_pct REAL NOT NULL DEFAULT 0.0
+        );
+        CREATE TABLE IF NOT EXISTS global_discount_rules (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          rule_type TEXT NOT NULL,
+          threshold REAL NOT NULL,
+          discount_pct REAL NOT NULL
+        );
+    """)
+    # Перенести старые захардкоженные типы клиентов в таблицу
+    defaults = [
+        ("Торговая сеть", 15.0),
+        ("Дистрибьютор",  5.0),
+        ("Оптовик",        2.0),
+        ("Обычный клиент", 0.0),
+    ]
+    for name, disc in defaults:
+        conn.execute(
+            "INSERT OR IGNORE INTO client_types(name, discount_pct) VALUES (?, ?)",
+            (name, disc),
+        )
+    conn.commit()
+
+
+def _migrate_v12(conn: sqlite3.Connection) -> None:
+    """Номер заказа и имя менеджера в сессиях расчёта."""
+    _add_column_if_missing(
+        conn, "calculation_sessions",
+        "order_number TEXT NOT NULL DEFAULT ''", "order_number"
+    )
+    _add_column_if_missing(
+        conn, "calculation_sessions",
+        "manager_name TEXT NOT NULL DEFAULT ''", "manager_name"
+    )
+    conn.commit()
+
+
+def _migrate_v11(conn: sqlite3.Connection) -> None:
+    """Привязка клиентов и расчётов к конкретному менеджеру."""
+    _add_column_if_missing(
+        conn, "clients",
+        "owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL", "owner_user_id"
+    )
+    _add_column_if_missing(
+        conn, "calculation_sessions",
+        "owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL", "owner_user_id"
+    )
+    conn.commit()
+
+
+def _migrate_v10(conn: sqlite3.Connection) -> None:
+    """Привязка клиентов к типам через FK client_type_id."""
+    _add_column_if_missing(
+        conn, "clients",
+        "client_type_id INTEGER REFERENCES client_types(id)", "client_type_id"
+    )
+    # Попробуем сопоставить старое текстовое поле с новыми записями
+    mapping = {
+        "retail_chain": "Торговая сеть",
+        "distributor":  "Дистрибьютор",
+        "wholesaler":   "Оптовик",
+        "regular":      "Обычный клиент",
+    }
+    for old_key, type_name in mapping.items():
+        row = conn.execute("SELECT id FROM client_types WHERE name=?", (type_name,)).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE clients SET client_type_id=? WHERE client_type=? AND client_type_id IS NULL",
+                (row[0], old_key),
+            )
+    # Клиентам без совпадения ставим «Обычный клиент»
+    regular = conn.execute(
+        "SELECT id FROM client_types WHERE name='Обычный клиент'"
+    ).fetchone()
+    if regular:
+        conn.execute(
+            "UPDATE clients SET client_type_id=? WHERE client_type_id IS NULL",
+            (regular[0],),
+        )
+    conn.commit()

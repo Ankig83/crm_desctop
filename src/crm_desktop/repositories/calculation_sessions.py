@@ -27,6 +27,8 @@ class SessionRow:
     client_name: str
     total: float
     details_json: str
+    order_number: str = ""
+    manager_name: str = ""
 
 
 def create(
@@ -37,13 +39,22 @@ def create(
     total: float,
     details: dict,
     lines: list[SessionLine],
+    order_number: str = "",
+    manager_name: str = "",
 ) -> int:
     cur = conn.execute(
         """
-        INSERT INTO calculation_sessions(created_at, quote_date, client_id, total, details_json)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO calculation_sessions(
+            created_at, quote_date, client_id, total, details_json,
+            order_number, manager_name
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (ts_now(), quote_date_iso, client_id, float(total), json.dumps(details, ensure_ascii=False)),
+        (
+            ts_now(), quote_date_iso, client_id, float(total),
+            json.dumps(details, ensure_ascii=False),
+            order_number, manager_name,
+        ),
     )
     sid = int(cur.lastrowid)
     for ln in lines:
@@ -72,7 +83,9 @@ def create(
 def list_recent(conn: sqlite3.Connection, limit: int = 200) -> list[SessionRow]:
     rows = conn.execute(
         """
-        SELECT s.id, s.created_at, s.quote_date, s.client_id, COALESCE(c.name, ''), s.total, s.details_json
+        SELECT s.id, s.created_at, s.quote_date, s.client_id,
+               COALESCE(c.name, ''), s.total, s.details_json,
+               COALESCE(s.order_number, ''), COALESCE(s.manager_name, '')
         FROM calculation_sessions s
         LEFT JOIN clients c ON c.id = s.client_id
         ORDER BY s.id DESC
@@ -89,6 +102,8 @@ def list_recent(conn: sqlite3.Connection, limit: int = 200) -> list[SessionRow]:
             client_name=r[4] or "",
             total=float(r[5] or 0),
             details_json=r[6] or "",
+            order_number=r[7] or "",
+            manager_name=r[8] or "",
         )
         for r in rows
     ]

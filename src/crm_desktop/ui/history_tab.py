@@ -27,6 +27,7 @@ class HistoryTab(QWidget):
         self._lines.setColumnCount(5)
         self._lines.setHorizontalHeaderLabels(["ID товара", "Товар", "Кол-во", "Скидка %", "Сумма"])
         self._summary = QLabel("Выберите сохранённый расчёт.")
+        self._summary.setTextFormat(Qt.TextFormat.RichText)
 
         right = QVBoxLayout()
         right.addWidget(self._summary)
@@ -46,7 +47,9 @@ class HistoryTab(QWidget):
         for s in calculation_sessions.list_recent(self._conn):
             qd = s.quote_date or "—"
             client = s.client_name or "—"
-            label = f"#{s.id} | {qd} | {client} | {s.total:.2f}"
+            order_no = s.order_number or f"#{s.id}"
+            manager = s.manager_name or "—"
+            label = f"{order_no} | {qd} | {client} | {manager} | {s.total:.2f} ₽"
             it = QListWidgetItem(label)
             it.setData(Qt.ItemDataRole.UserRole, s.id)
             self._sessions.addItem(it)
@@ -62,8 +65,19 @@ class HistoryTab(QWidget):
         if not it:
             return
         sid = it.data(Qt.ItemDataRole.UserRole)
+        sessions = calculation_sessions.list_recent(self._conn, limit=1000)
+        sess = next((s for s in sessions if s.id == int(sid)), None)
         lines = calculation_sessions.list_lines(self._conn, int(sid))
-        self._summary.setText(f"Сессия #{sid}, строк: {len(lines)}")
+
+        order_no = (sess.order_number if sess and sess.order_number else f"#{sid}")
+        manager = (sess.manager_name if sess and sess.manager_name else "—")
+        client = (sess.client_name if sess and sess.client_name else "—")
+        total = f"{sess.total:.2f}" if sess else "—"
+        self._summary.setText(
+            f"<b>Заказ: {order_no}</b> | Менеджер: {manager} | "
+            f"Клиент: {client} | Итого: {total} ₽ | Строк: {len(lines)}"
+        )
+
         for ln in lines:
             r = self._lines.rowCount()
             self._lines.insertRow(r)

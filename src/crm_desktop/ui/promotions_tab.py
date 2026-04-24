@@ -8,6 +8,8 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDateEdit,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
     QFrame,
@@ -37,6 +39,102 @@ from crm_desktop.utils.bonus_ids import (
 from crm_desktop.utils.dates import format_dmY, iso, parse_dmY, parse_iso
 
 
+class _ProductPickerDialog(QDialog):
+    """Диалог выбора товаров по артикулу/названию.
+
+    multi=False → одиночный выбор (для колонки «Конкретный»).
+    multi=True  → множественный выбор (для колонки «На выбор»).
+    preselected → список артикулов, которые нужно отметить сразу.
+    """
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        multi: bool = False,
+        preselected: list[str] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Выбор товара" if not multi else "Выбор товаров (можно несколько)")
+        self.setMinimumSize(460, 400)
+
+        self._all_products = products.list_all(conn)
+        pre = set(preselected or [])
+
+        layout = QVBoxLayout(self)
+
+        hint = QLabel(
+            "Двойной клик или Enter — подтвердить выбор."
+            if not multi else
+            "Отмечайте товары кликом (Ctrl+клик для снятия). Затем нажмите OK."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Поиск по артикулу или названию…")
+        self._search.textChanged.connect(self._filter)
+        layout.addWidget(self._search)
+
+        self._list = QListWidget()
+        self._list.setSelectionMode(
+            QListWidget.SelectionMode.MultiSelection if multi
+            else QListWidget.SelectionMode.SingleSelection
+        )
+        layout.addWidget(self._list)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+        self._populate(self._all_products, pre)
+
+        # Двойной клик по строке сразу подтверждает (удобно для одиночного выбора)
+        if not multi:
+            self._list.itemDoubleClicked.connect(lambda _: self.accept())
+
+    # ── внутренние методы ──────────────────────────────────────────
+
+    def _populate(self, prods: list, preselected: set[str]) -> None:
+        self._list.clear()
+        for p in prods:
+            ext = p.external_id or ""
+            label = f"{ext or '—':>10}   {p.name}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, ext)
+            self._list.addItem(item)
+            if ext and ext in preselected:
+                item.setSelected(True)
+        # Прокручиваем к первому выделенному элементу
+        sel = self._list.selectedItems()
+        if sel:
+            self._list.scrollToItem(sel[0])
+
+    def _filter(self, text: str) -> None:
+        txt = text.strip().lower()
+        pre = {
+            item.data(Qt.ItemDataRole.UserRole)
+            for item in self._list.selectedItems()
+        }
+        filtered = [
+            p for p in self._all_products
+            if txt in (p.name or "").lower() or txt in (p.external_id or "").lower()
+        ] if txt else self._all_products
+        self._populate(filtered, pre)
+
+    # ── публичный результат ────────────────────────────────────────
+
+    def selected_ids(self) -> list[str]:
+        return [
+            item.data(Qt.ItemDataRole.UserRole)
+            for item in self._list.selectedItems()
+            if item.data(Qt.ItemDataRole.UserRole)
+        ]
+
+
 def _hsep() -> QFrame:
     line = QFrame()
     line.setFrameShape(QFrame.Shape.HLine)
@@ -62,12 +160,6 @@ class PromotionsTab(QWidget):
         self._disc = QLineEdit()
         self._disc.setPlaceholderText("Процент, например 10")
         self._disc.setToolTip("Базовая скидка в % для этой акции (поле promotions.discount_percent).")
-        self._bonus_ids = QLineEdit()
-        self._bonus_ids.setPlaceholderText("Например: 4,5,12 — внешние ID товаров из каталога")
-        self._bonus_ids.setToolTip(
-            "Товары, которые клиент может получить бонусом по акции «другой товар». "
-            "Те же ID, что в колонке «ID товара» в Excel товаров. Через запятую."
-        )
         self._d1 = QDateEdit()
         self._d2 = QDateEdit()
         for d in (self._d1, self._d2):
@@ -83,66 +175,19 @@ class PromotionsTab(QWidget):
         self._no_d2.setToolTip("Акция действует бессрочно — без даты завершения.")
         self._no_d2.toggled.connect(lambda v: self._d2.setEnabled(not v))
 
+        self._disc_err = QLabel("")
+        self._disc_err.setStyleSheet("color:#c0392b; font-size:9pt;")
+        self._disc_err.hide()
+        self._disc.textChanged.connect(lambda _: self._clear_field_error(self._disc, self._disc_err))
+
         basic_form = QFormLayout()
         basic_form.addRow("Товар:", self._product)
         basic_form.addRow("Базовая скидка %:", self._disc)
-        basic_form.addRow("ID товаров-бонусов:", self._bonus_ids)
+        basic_form.addRow("", self._disc_err)
         basic_form.addRow("Дата начала:", self._d1)
         basic_form.addRow("", self._no_d1)
         basic_form.addRow("Дата окончания:", self._d2)
         basic_form.addRow("", self._no_d2)
-
-        # ── QGroupBox: Скидка за предоплату ──────────────────
-        self._prepay_table = QTableWidget(0, 2)
-        self._prepay_table.setHorizontalHeaderLabels(["Порог предоплаты %", "Скидка %"])
-        self._prepay_table.setMaximumHeight(130)
-        self._prepay_table.horizontalHeader().setStretchLastSection(True)
-        self._prepay_table.setToolTip(
-            "Если клиент вносит предоплату ≥ порогу, применяется скидка.\n"
-            "Пример: порог 25 → скидка 2% при предоплате от 25%."
-        )
-        btn_add_prepay = QPushButton("+ Порог")
-        btn_del_prepay = QPushButton("− Удалить")
-        btn_add_prepay.setMaximumWidth(90)
-        btn_del_prepay.setMaximumWidth(90)
-        btn_add_prepay.clicked.connect(self._prepay_add_row)
-        btn_del_prepay.clicked.connect(lambda: self._table_del_row(self._prepay_table))
-        prepay_btns = QHBoxLayout()
-        prepay_btns.addWidget(btn_add_prepay)
-        prepay_btns.addWidget(btn_del_prepay)
-        prepay_btns.addStretch()
-
-        gb_prepay = QGroupBox("Скидки за предоплату")
-        prepay_lay = QVBoxLayout(gb_prepay)
-        prepay_lay.addWidget(QLabel("Предоплата ≥ (%) → скидка (%)  [пример: 25 → 2]"))
-        prepay_lay.addWidget(self._prepay_table)
-        prepay_lay.addLayout(prepay_btns)
-
-        # ── QGroupBox: Скидка за объём ────────────────────────
-        self._volume_table = QTableWidget(0, 2)
-        self._volume_table.setHorizontalHeaderLabels(["Порог (коробок)", "Скидка %"])
-        self._volume_table.setMaximumHeight(130)
-        self._volume_table.horizontalHeader().setStretchLastSection(True)
-        self._volume_table.setToolTip(
-            "Суммарное кол-во коробок в заказе ≥ порогу → применяется скидка.\n"
-            "Пример: 300 кор → −6%, 500 кор → −8%."
-        )
-        btn_add_vol = QPushButton("+ Порог")
-        btn_del_vol = QPushButton("− Удалить")
-        btn_add_vol.setMaximumWidth(90)
-        btn_del_vol.setMaximumWidth(90)
-        btn_add_vol.clicked.connect(self._volume_add_row)
-        btn_del_vol.clicked.connect(lambda: self._table_del_row(self._volume_table))
-        vol_btns = QHBoxLayout()
-        vol_btns.addWidget(btn_add_vol)
-        vol_btns.addWidget(btn_del_vol)
-        vol_btns.addStretch()
-
-        gb_volume = QGroupBox("Скидки за объём заказа")
-        vol_lay = QVBoxLayout(gb_volume)
-        vol_lay.addWidget(QLabel("Коробок в заказе ≥ (шт) → скидка (%)  [пример: 300 → 6]"))
-        vol_lay.addWidget(self._volume_table)
-        vol_lay.addLayout(vol_btns)
 
         # ── QGroupBox: Продуктовая скидка ────────────────────
         self._expiry_pct = QDoubleSpinBox()
@@ -200,10 +245,11 @@ class PromotionsTab(QWidget):
         self._bonus_table.setToolTip(
             "Порог       — мин. кол-во коробок для активации бонуса.\n"
             "Тот же      — бесплатных кор. ТОГО ЖЕ товара.\n"
-            "Конкретный  — артикул другого товара (добавляется автоматически).\n"
+            "Конкретный  — двойной клик → выбрать товар из каталога.\n"
             "Кол-во      — сколько коробок конкретного товара.\n"
-            "На выбор    — артикулы через запятую; менеджер выберет 1 в расчёте."
+            "На выбор    — двойной клик → выбрать несколько товаров из каталога."
         )
+        self._bonus_table.cellDoubleClicked.connect(self._on_bonus_cell_dblclick)
 
         btn_add_bonus = QPushButton("+ Правило")
         btn_del_bonus = QPushButton("− Удалить")
@@ -268,8 +314,6 @@ class PromotionsTab(QWidget):
         right_inner.addWidget(title)
         right_inner.addLayout(basic_form)
         right_inner.addWidget(_hsep())
-        right_inner.addWidget(gb_prepay)
-        right_inner.addWidget(gb_volume)
         right_inner.addWidget(gb_expiry)
         right_inner.addWidget(gb_promo)
         right_inner.addLayout(btns_row)
@@ -296,17 +340,18 @@ class PromotionsTab(QWidget):
     # Служебные: таблицы порогов
     # ─────────────────────────────────────────────────────────
 
-    def _prepay_add_row(self) -> None:
-        r = self._prepay_table.rowCount()
-        self._prepay_table.insertRow(r)
-        self._prepay_table.setItem(r, 0, QTableWidgetItem("25"))
-        self._prepay_table.setItem(r, 1, QTableWidgetItem("2"))
+    # ── подсветка ошибок ──────────────────────────────────────────────
 
-    def _volume_add_row(self) -> None:
-        r = self._volume_table.rowCount()
-        self._volume_table.insertRow(r)
-        self._volume_table.setItem(r, 0, QTableWidgetItem("300"))
-        self._volume_table.setItem(r, 1, QTableWidgetItem("6"))
+    @staticmethod
+    def _mark_field_error(widget: QWidget, label: QLabel, msg: str) -> None:
+        widget.setStyleSheet("border: 2px solid #e74c3c; background:#fff5f5;")
+        label.setText(msg)
+        label.show()
+
+    @staticmethod
+    def _clear_field_error(widget: QWidget, label: QLabel) -> None:
+        widget.setStyleSheet("")
+        label.hide()
 
     def _table_del_row(self, table: QTableWidget) -> None:
         r = table.currentRow()
@@ -319,34 +364,6 @@ class PromotionsTab(QWidget):
 
     def _collect_matrix_rules(self) -> dict:
         mr: dict = {}
-
-        # Скидки за предоплату
-        for r in range(self._prepay_table.rowCount()):
-            thr_it = self._prepay_table.item(r, 0)
-            disc_it = self._prepay_table.item(r, 1)
-            if not thr_it or not disc_it:
-                continue
-            try:
-                thr = int(float(thr_it.text().replace(",", ".").strip()))
-                disc = float(disc_it.text().replace(",", ".").strip())
-            except ValueError:
-                continue
-            if thr > 0 and disc > 0:
-                mr[f"prepay_{thr}"] = disc
-
-        # Скидки за объём
-        for r in range(self._volume_table.rowCount()):
-            thr_it = self._volume_table.item(r, 0)
-            disc_it = self._volume_table.item(r, 1)
-            if not thr_it or not disc_it:
-                continue
-            try:
-                thr = int(float(thr_it.text().replace(",", ".").strip()))
-                disc = float(disc_it.text().replace(",", ".").strip())
-            except ValueError:
-                continue
-            if thr > 0 and disc > 0:
-                mr[f"volume_{thr}"] = disc
 
         # Продуктовая скидка
         epct = self._expiry_pct.value()
@@ -406,33 +423,6 @@ class PromotionsTab(QWidget):
 
     def _load_matrix_rules(self, mr: dict) -> None:
         """Загружает matrix_rules в поля UI."""
-        # Таблицы порогов
-        self._prepay_table.setRowCount(0)
-        self._volume_table.setRowCount(0)
-
-        for key in sorted(mr.keys()):
-            if key.startswith("prepay_"):
-                try:
-                    thr = float(key.split("_", 1)[1])
-                    disc = float(mr[key] or 0)
-                except (ValueError, IndexError):
-                    continue
-                r = self._prepay_table.rowCount()
-                self._prepay_table.insertRow(r)
-                self._prepay_table.setItem(r, 0, QTableWidgetItem(str(int(thr))))
-                self._prepay_table.setItem(r, 1, QTableWidgetItem(str(disc)))
-
-            elif key.startswith("volume_"):
-                try:
-                    thr = float(key.split("_", 1)[1])
-                    disc = float(mr[key] or 0)
-                except (ValueError, IndexError):
-                    continue
-                r = self._volume_table.rowCount()
-                self._volume_table.insertRow(r)
-                self._volume_table.setItem(r, 0, QTableWidgetItem(str(int(thr))))
-                self._volume_table.setItem(r, 1, QTableWidgetItem(str(disc)))
-
         # Продуктовая скидка
         try:
             self._expiry_pct.setValue(float(mr.get("expiry_pct", 0) or 0))
@@ -509,8 +499,6 @@ class PromotionsTab(QWidget):
             self._promo_date_to.setEnabled(False)
 
     def _clear_matrix_rules_ui(self) -> None:
-        self._prepay_table.setRowCount(0)
-        self._volume_table.setRowCount(0)
         self._expiry_pct.setValue(0.0)
         self._expiry_rub.setValue(0.0)
         self._floor_pct.setValue(0.0)
@@ -522,6 +510,30 @@ class PromotionsTab(QWidget):
 
     def _bonus_add_row(self) -> None:
         self._bonus_table_insert("50", "0", "", "1", "")
+
+    def _on_bonus_cell_dblclick(self, row: int, col: int) -> None:
+        """Двойной клик по «Конкретный» (col 2) или «На выбор» (col 4) — открыть подборщик товаров."""
+        if col not in (2, 4):
+            return
+        multi = col == 4
+        it = self._bonus_table.item(row, col)
+        existing_text = it.text().strip() if it else ""
+        pre = [s.strip() for s in existing_text.split(",") if s.strip()] if existing_text else []
+
+        dlg = _ProductPickerDialog(self._conn, multi=multi, preselected=pre, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        ids = dlg.selected_ids()
+        if not ids:
+            return
+
+        if col == 2:
+            # Конкретный артикул — один товар, берём первый выбранный
+            self._bonus_table.setItem(row, col, QTableWidgetItem(ids[0]))
+        else:
+            # На выбор — несколько, через запятую
+            self._bonus_table.setItem(row, col, QTableWidgetItem(", ".join(ids)))
 
     def _bonus_table_insert(
         self, threshold: str, same_qty: str, fixed_id: str, fixed_qty: str, choice_ids: str
@@ -539,7 +551,12 @@ class PromotionsTab(QWidget):
     # ─────────────────────────────────────────────────────────
 
     def reload(self) -> None:
-        self._fill_product_combo(None)
+        saved_pid = self._current_product_id
+        # Если пользователь заполнял новую акцию (ещё не сохранял),
+        # запоминаем выбранный товар в комбо, чтобы не потерять черновик
+        draft_combo_pid = self._product.currentData() if saved_pid is None else None
+
+        self._fill_product_combo(draft_combo_pid)
         self._list.clear()
         for r in promotions.list_all(self._conn):
             d1 = parse_iso(r.valid_from_iso)
@@ -550,6 +567,17 @@ class PromotionsTab(QWidget):
             it = QListWidgetItem(label)
             it.setData(Qt.ItemDataRole.UserRole, r.product_id)
             self._list.addItem(it)
+
+        if saved_pid is None:
+            # Черновик новой акции — не трогаем форму, список обновился в фоне
+            return
+
+        # Восстанавливаем выделение той же акции, что была открыта
+        for i in range(self._list.count()):
+            if self._list.item(i).data(Qt.ItemDataRole.UserRole) == saved_pid:
+                self._list.setCurrentRow(i)
+                return
+        # Если акция была удалена — выбираем первую
         if self._list.count():
             self._list.setCurrentRow(0)
 
@@ -586,7 +614,6 @@ class PromotionsTab(QWidget):
         pr = promotions.get_for_product(self._conn, product_id)
         if pr:
             self._disc.setText(str(pr.discount_percent))
-            self._bonus_ids.setText(pr.bonus_other_product_ids.replace(",", ", "))
             d1 = parse_iso(pr.valid_from_iso)
             d2 = parse_iso(pr.valid_to_iso)
             # Sentinel «бессрочно»: год ≤ 1 = без даты начала, год ≥ 9999 = без окончания
@@ -618,7 +645,6 @@ class PromotionsTab(QWidget):
             self._load_matrix_rules(mr)
         else:
             self._disc.clear()
-            self._bonus_ids.clear()
             self._d1.setDate(QDate.currentDate())
             self._d2.setDate(QDate.currentDate())
             self._clear_matrix_rules_ui()
@@ -636,10 +662,14 @@ class PromotionsTab(QWidget):
             return
         product_id = int(pid)
 
+        self._clear_field_error(self._disc, self._disc_err)
         try:
             disc = float(self._disc.text().strip().replace(",", "."))
+            if not (0 <= disc <= 100):
+                raise ValueError
         except ValueError:
-            QMessageBox.warning(self, "Скидка", "Укажите число процента.")
+            self._mark_field_error(self._disc, self._disc_err, "Введите число от 0 до 100")
+            self._disc.setFocus()
             return
 
         q1 = self._d1.date()
@@ -659,18 +689,6 @@ class PromotionsTab(QWidget):
             d2_check = d2
             if not self._no_d1.isChecked() and d1 > d2:
                 QMessageBox.warning(self, "Период", "Дата начала не может быть позже окончания.")
-                return
-
-        bonus_norm = normalize_product_external_ids_csv(self._bonus_ids.text())
-        parsed_bonus = parse_product_external_ids_csv(self._bonus_ids.text())
-        if parsed_bonus:
-            miss = missing_product_external_ids(self._conn, parsed_bonus)
-            if miss:
-                QMessageBox.warning(
-                    self,
-                    "Бонусные товары",
-                    "Нет товаров с такими внешними ID в каталоге:\n" + ", ".join(miss),
-                )
                 return
 
         # Проверяем ID бонусных товаров в таблице бонусов
@@ -701,7 +719,7 @@ class PromotionsTab(QWidget):
             discount_percent=disc,
             valid_from_iso=valid_from,
             valid_to_iso=valid_to,
-            bonus_other_product_ids=bonus_norm,
+            bonus_other_product_ids="",
             matrix_rules_json=mr_json,
         )
         audit.log(self._conn, "upsert", "promotion", str(product_id))
@@ -740,7 +758,6 @@ class PromotionsTab(QWidget):
         if self._product.count():
             self._product.setCurrentIndex(0)
         self._disc.clear()
-        self._bonus_ids.clear()
         self._d1.setDate(QDate.currentDate())
         self._d2.setDate(QDate.currentDate())
         self._no_d1.setChecked(False)

@@ -9,7 +9,7 @@ from typing import Any
 
 from openpyxl import Workbook, load_workbook
 
-from crm_desktop.repositories import audit, clients, products, promotions
+from crm_desktop.repositories import audit, clients, global_discounts, products, promotions
 from crm_desktop.repositories.clients import CLIENT_TYPES
 from crm_desktop.utils.bonus_ids import (
     missing_product_external_ids,
@@ -31,6 +31,7 @@ class ImportReport:
     clients_rows: int = 0
     products_rows: int = 0
     promotions_rows: int = 0
+    discounts_rows: int = 0
 
 
 def _row_is_empty(row: tuple[Any, ...]) -> bool:
@@ -529,3 +530,113 @@ def export_promotions(conn: sqlite3.Connection, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
     audit.log(conn, "export", "promotions", str(path))
+
+
+# ─────────────────────────────────────────────────────────────
+# ЭКСПОРТ ГЛОБАЛЬНЫХ СКИДОК
+# ─────────────────────────────────────────────────────────────
+
+_DISCOUNT_TYPE_LABELS = {
+    "prepay": "Предоплата",
+    "volume": "Объём",
+}
+_DISCOUNT_TYPE_PARSE: dict[str, str] = {
+    "предоплата": "prepay",
+    "prepay": "prepay",
+    "prepayment": "prepay",
+    "объём": "volume",
+    "объем": "volume",
+    "volume": "volume",
+}
+
+
+def export_global_discounts(conn: sqlite3.Connection, path: Path) -> None:
+    """Экспортировать правила глобальных скидок (предоплата и объём) в Excel."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "discounts"
+    ws.append(["Тип скидки", "Порог (%/коробок)", "Скидка %"])
+    for rule_type in ("prepay", "volume"):
+        for r in global_discounts.list_by_type(conn, rule_type):
+            ws.append([
+                _DISCOUNT_TYPE_LABELS.get(r.rule_type, r.rule_type),
+                r.threshold,
+                r.discount_pct,
+            ])
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(path)
+    audit.log(conn, "export", "global_discounts", str(path))
+
+
+# ─────────────────────────────────────────────────────────────
+# ИМПОРТ ГЛОБАЛЬНЫХ СКИДОК
+# ─────────────────────────────────────────────────────────────
+
+def import_global_discounts(conn: sqlite3.Connection, path: Path) -> ImportReport:
+    """Импортировать правила скидок из Excel.
+
+    Ожидаемые колонки: «Тип скидки», «Порог (%/коробок)», «Скидка %».
+    Значение «Тип скидки»: «Предоплата» или «Объём» (регистр не важен).
+    Все старые правила заменяются новыми из файла (атомарная замена по типу).
+    """
+    rep = ImportReport()
+    try:
+        wb = load_workbook(path, read_only=True, data_only=True)
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+    except Exception as e:  # noqa: BLE001
+        rep.errors.append(f"Не удалось открыть файл скидок: {e}")
+        return rep
+
+    if not rows:
+        rep.errors.append("Файл скидок пуст.")
+        return rep
+
+    hm = _header_map(rows[0])
+    required = ("тип скидки", "порог", "скидка")
+    if not any(_norm_header(r) in hm for r in required):
+        # Попробуем без заголовка: колонки A, B, C (0, 1, 2)
+        data_rows = rows
+        header_mode = False
+    else:
+        data_rows = rows[1:]
+        header_mode = True
+
+    # Накапливаем правила по типу, потом атомарно записываем
+    collected: dict[str, list[tuple[float, float]]] = {"prepay": [], "volume": []}
+
+    for line_no, row in enumerate(data_rows, start=2 if header_mode else 1):
+        if row is None or _row_is_empty(row):
+            continue
+        if header_mode:
+            type_raw = _cell(row, hm, "тип скидки", "тип")
+            thr_s    = _cell(row, hm, "порог (%/коробок)", "порог")
+            disc_s   = _cell(row, hm, "скидка %", "скидка")
+        else:
+            type_raw = str(row[0] or "").strip()
+            thr_s    = str(row[1] or "").strip()
+            disc_s   = str(row[2] or "").strip()
+
+        rule_type = _DISCOUNT_TYPE_PARSE.get(type_raw.strip().lower(), "")
+        if not rule_type:
+            rep.errors.append(f"Скидки, строка {line_no}: неизвестный тип «{type_raw}».")
+            continue
+        try:
+            threshold = float(thr_s.replace(",", "."))
+            disc_pct  = float(disc_s.replace(",", "."))
+        except (ValueError, AttributeError):
+            rep.errors.append(f"Скидки, строка {line_no}: некорректные числа.")
+            continue
+        collected[rule_type].append((threshold, disc_pct))
+        rep.discounts_rows += 1
+
+    if rep.errors:
+        return rep
+
+    for rule_type, rules in collected.items():
+        if rules:  # Заменяем только те типы, для которых есть данные
+            global_discounts.set_rules(conn, rule_type, rules)
+
+    audit.log(conn, "import", "global_discounts", str(path))
+    return rep

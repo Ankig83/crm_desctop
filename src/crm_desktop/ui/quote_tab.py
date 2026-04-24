@@ -31,8 +31,9 @@ from PySide6.QtWidgets import (
 
 from crm_desktop.adapters.quote_pdf import export_quote_pdf
 from crm_desktop.adapters.rus_export import RusLine, export_rus_variant_a
-from crm_desktop.repositories import audit, calculation_sessions, clients, products, promotions, settings as settings_repo
+from crm_desktop.repositories import audit, calculation_sessions, clients, global_discounts, products, promotions, settings as settings_repo
 from crm_desktop.services import email_send
+from crm_desktop.services.order_number import confirm_order_number, next_order_number
 from crm_desktop.services.bonus import (
     BonusRule,
     collect_bonus_thresholds,
@@ -99,9 +100,15 @@ class _BonusPickerDialog(QDialog):
 
 
 class QuoteTab(QWidget):
-    def __init__(self, conn: sqlite3.Connection, parent=None) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        parent=None,
+        user_name: str = "",
+    ) -> None:
         super().__init__(parent)
         self._conn = conn
+        self._user_name = user_name
         self._block = False
         self._recalcing = False          # защита от рекурсивного вызова _recalc
         self._bonus_choices: dict[int, str] = {}
@@ -130,12 +137,14 @@ class QuoteTab(QWidget):
         )
 
         # ── Номер заказа ──────────────────────────────────────
-        _next_no = settings_repo.get(conn, "next_order_no", "1") or "1"
+        _next_no = next_order_number(conn, user_name)
         self._order_no = QLineEdit(_next_no)
-        self._order_no.setMaximumWidth(80)
+        self._order_no.setMinimumWidth(110)
+        self._order_no.setMaximumWidth(130)
         self._order_no.setToolTip(
-            "Номер заказа — проставляется автоматически.\n"
-            "Можно исправить вручную перед экспортом."
+            "Номер заказа — формируется автоматически из инициалов\n"
+            "менеджера и порядкового номера (например: СОИ-000001).\n"
+            "Можно скорректировать вручную перед экспортом."
         )
 
         # ── Предоплата % ─────────────────────────────────────
@@ -294,42 +303,25 @@ class QuoteTab(QWidget):
             pass
         return {}
 
-    def _prepay_discount_for(self, matrix_rules: dict) -> float:
-        """Скидка за предоплату: ищет наибольший подходящий порог prepay_<N>."""
+    def _prepay_discount_for(self, _ignored: dict = {}) -> float:  # noqa: B006
+        """Скидка за предоплату из глобальной таблицы global_discount_rules."""
         prepay = self._prepay_pct()
         if prepay <= 0:
             return 0.0
         best = 0.0
-        for key, val in matrix_rules.items():
-            if not key.startswith("prepay_"):
-                continue
-            try:
-                threshold = float(key.split("_", 1)[1])
-                disc = float(val or 0)
-            except (ValueError, IndexError):
-                continue
-            if prepay >= threshold and disc > best:
-                best = disc
+        for rule in global_discounts.list_by_type(self._conn, "prepay"):
+            if prepay >= rule.threshold and rule.discount_pct > best:
+                best = rule.discount_pct
         return best
 
-    def _volume_discount_for(self, matrix_rules: dict, total_boxes: float) -> float:
-        """
-        Скидка за объём: ищет наибольший подходящий порог volume_<N>.
-        total_boxes — суммарное кол-во коробок по всем обычным строкам заказа.
-        """
+    def _volume_discount_for(self, _ignored: dict = {}, total_boxes: float = 0.0) -> float:  # noqa: B006
+        """Скидка за объём из глобальной таблицы global_discount_rules."""
         if total_boxes <= 0:
             return 0.0
         best = 0.0
-        for key, val in matrix_rules.items():
-            if not key.startswith("volume_"):
-                continue
-            try:
-                threshold = float(key.split("_", 1)[1])
-                disc = float(val or 0)
-            except (ValueError, IndexError):
-                continue
-            if total_boxes >= threshold and disc > best:
-                best = disc
+        for rule in global_discounts.list_by_type(self._conn, "volume"):
+            if total_boxes >= rule.threshold and rule.discount_pct > best:
+                best = rule.discount_pct
         return best
 
     def _product_discount_for(self, matrix_rules: dict) -> float:
@@ -471,6 +463,8 @@ class QuoteTab(QWidget):
         self._table.setRowCount(0)
         self._prepay.setValue(0)
         self._block = False
+        # Обновить номер заказа на следующий доступный
+        self._order_no.setText(next_order_number(self._conn, self._user_name))
         self._add_line()
 
     def _add_line(self) -> None:
@@ -860,12 +854,13 @@ class QuoteTab(QWidget):
             ))
         return total, payload
 
-    def _save_session(self) -> int | None:
+    def _save_session(self, *, confirm_no: bool = False) -> int | None:
         total, lines = self._session_payload()
         if not lines:
             QMessageBox.warning(self, "История расчётов", "Нет строк для сохранения.")
             return None
         cid = self._client.currentData()
+        order_no = self._order_no.text().strip() or next_order_number(self._conn, self._user_name)
         sid = calculation_sessions.create(
             self._conn,
             quote_date_iso=iso(self._quote_date()),
@@ -877,14 +872,24 @@ class QuoteTab(QWidget):
                 "total_boxes": self._calc_total_boxes(),
             },
             lines=lines,
+            order_number=order_no,
+            manager_name=self._user_name,
         )
+        if confirm_no:
+            confirm_order_number(self._conn, self._user_name)
+            new_no = next_order_number(self._conn, self._user_name)
+            self._order_no.setText(new_no)
         audit.log(self._conn, "create", "calculation_session", str(sid))
         return sid
 
     def _save_session_action(self) -> None:
-        sid = self._save_session()
+        sid = self._save_session(confirm_no=True)
         if sid is not None:
-            QMessageBox.information(self, "История расчётов", f"Сессия сохранена: #{sid}")
+            order_no = self._order_no.text().strip()
+            QMessageBox.information(
+                self, "История расчётов",
+                f"Сессия сохранена: #{sid}\nНомер заказа: {order_no}"
+            )
 
     # ─────────────────────────────────────────────────────────
     # Сбор строк для RUS.xlsx
@@ -1016,9 +1021,9 @@ class QuoteTab(QWidget):
             QMessageBox.critical(self, "Ошибка", str(e))
 
     def _export_rus(self) -> None:
-        order_no = self._order_no.text().strip() or "1"
+        order_no = self._order_no.text().strip() or next_order_number(self._conn, self._user_name)
         path, _ = QFileDialog.getSaveFileName(
-            self, "Сформировать RUS.xlsx", f"RUS{order_no}.xlsx", "Excel (*.xlsx)"
+            self, "Сформировать RUS.xlsx", f"RUS_{order_no}.xlsx", "Excel (*.xlsx)"
         )
         if not path:
             return
@@ -1031,16 +1036,9 @@ class QuoteTab(QWidget):
                 lines=self._collect_rus_lines(),
                 order_no=order_no,
             )
-            self._save_session()
+            self._save_session(confirm_no=True)
             audit.log(self._conn, "export", "rus_xlsx", path)
-            # Инкрементируем счётчик заказов
-            try:
-                next_no = str(int(order_no) + 1)
-            except ValueError:
-                next_no = order_no
-            settings_repo.set_value(self._conn, "next_order_no", next_no)
-            self._order_no.setText(next_no)
-            QMessageBox.information(self, "Готово", f"RUS{order_no}.xlsx сформирован.")
+            QMessageBox.information(self, "Готово", f"RUS_{order_no}.xlsx сформирован.")
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "Ошибка", str(e))
 
