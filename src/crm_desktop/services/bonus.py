@@ -73,6 +73,17 @@ def collect_bonus_thresholds(matrix_rules: dict) -> list[BonusRule]:
     return result
 
 
+def bonus_multiplier(qty: float, threshold: float) -> int:
+    """Сколько раз подряд «сработало» одно пороговое правило.
+
+    Например: порог 10 кор, правило «+1 кор бесплатно», количество 20 кор
+    → ``20 // 10 == 2`` — начисляется 2 бесплатные коробки за два полных порога.
+    """
+    if threshold <= 0:
+        return 0
+    return int(qty // threshold)
+
+
 def find_best_threshold(thresholds: list[BonusRule], qty: float) -> BonusRule | None:
     """Из правил, у которых qty >= порог, возвращает правило с наибольшим порогом.
 

@@ -36,6 +36,7 @@ from crm_desktop.services import email_send
 from crm_desktop.services.order_number import confirm_order_number, next_order_number
 from crm_desktop.services.bonus import (
     BonusRule,
+    bonus_multiplier,
     collect_bonus_thresholds,
     find_best_threshold,
     promo_bonus_active,
@@ -445,10 +446,15 @@ class QuoteTab(QWidget):
 
     @staticmethod
     def _effective_price(p) -> float:
-        """Фактическая цена коробки: штук × цена за штуку (консистентно с вкладкой Товары)."""
-        if p.regular_piece_price > 0 and p.units_per_box > 0:
-            return round(p.regular_piece_price * p.units_per_box, 2)
-        return p.base_price
+        """Фактическая цена коробки: штук × цена за штуку (как во вкладке «Товары»).
+
+        Если в карточке указано «штук в коробке» > 0, цена коробки всегда
+        считается из цены за штуку, в том числе при **нулевой** цене штуки.
+        Иначе используется поле «базовая цена коробки» (старый режим).
+        """
+        if p.units_per_box > 0:
+            return round(float(p.regular_piece_price) * int(p.units_per_box), 2)
+        return float(p.base_price)
 
     def _new_calc(self) -> None:
         """Очищает все строки расчёта и начинает новый заказ."""
@@ -664,25 +670,29 @@ class QuoteTab(QWidget):
                 if best:
                     threshold, same_qty, fixed_id, fixed_qty, choice_ids = best
                     ins = r
+                    mult = bonus_multiplier(qty, threshold)
 
                     # 1) Бесплатные коробки того же товара
-                    if same_qty > 0:
+                    if same_qty > 0 and mult > 0:
+                        free_same = same_qty * mult
                         ins = self._add_bonus_row(
-                            ins, p, same_qty,
-                            f"  ×{same_qty} (купи {threshold:.0f} → получи {same_qty} бесплатно)"
+                            ins, p, float(free_same),
+                            f"  ×{free_same} бесплатно "
+                            f"(каждые {threshold:.0f} кор +{same_qty}, сработало ×{mult})",
                         )
 
                     # 2) Конкретный другой товар (фиксированный, автоматически)
-                    if fixed_id:
+                    if fixed_id and mult > 0:
                         bp_fixed = products.by_external_id(self._conn, fixed_id)
                         if bp_fixed:
+                            fq = fixed_qty * mult
                             ins = self._add_bonus_row(
-                                ins, bp_fixed, fixed_qty,
-                                f"  ×{fixed_qty} (бонус: {bp_fixed.name})"
+                                ins, bp_fixed, float(fq),
+                                f"  ×{fq} бесплатно — {bp_fixed.name} (×{mult} порогов)",
                             )
 
                     # 3) Товар на выбор из списка (менеджер выбирает)
-                    if choice_ids:
+                    if choice_ids and mult > 0:
                         chosen = self._bonus_choices.get(r)
                         if len(choice_ids) == 1:
                             chosen = choice_ids[0]
@@ -696,8 +706,8 @@ class QuoteTab(QWidget):
                             bp = products.by_external_id(self._conn, chosen)
                             if bp:
                                 self._add_bonus_row(
-                                    ins, bp, 1,
-                                    "  (бонус на выбор)"
+                                    ins, bp, float(mult),
+                                    f"  ×{mult} бесплатно — на выбор ({bp.name})",
                                 )
 
             r += 1
@@ -977,7 +987,8 @@ class QuoteTab(QWidget):
                 qty=qty,
                 regular_price_per_box=ep,
                 regular_price_per_piece=(
-                    p.regular_piece_price if p.regular_piece_price > 0
+                    float(p.regular_piece_price)
+                    if p.units_per_box > 0
                     else (ep / p.units_per_box if p.units_per_box > 0 else 0.0)
                 ),
                 units_per_box=p.units_per_box,
@@ -1043,7 +1054,14 @@ class QuoteTab(QWidget):
             QMessageBox.critical(self, "Ошибка", str(e))
 
     def _send_mail(self) -> None:
-        to_s, ok = QInputDialog.getText(self, "E-mail", "Адрес получателя:")
+        last = settings_repo.get(self._conn, "quote_email_last_recipient", "") or ""
+        to_s, ok = QInputDialog.getText(
+            self,
+            "E-mail",
+            "Адрес получателя:",
+            QLineEdit.EchoMode.Normal,
+            last,
+        )
         if not ok or not to_s.strip():
             return
         body = self._build_text()
@@ -1056,6 +1074,7 @@ class QuoteTab(QWidget):
             email_send.send_with_attachment(
                 self._conn, [to_s.strip()], "Расчёт из CRM", body, tmp_path,
             )
+            settings_repo.set_value(self._conn, "quote_email_last_recipient", to_s.strip())
             self._save_session()
             audit.log(self._conn, "email", "quote", to_s.strip())
             QMessageBox.information(self, "Готово", "Письмо отправлено.")
