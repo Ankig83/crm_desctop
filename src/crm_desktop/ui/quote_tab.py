@@ -33,6 +33,7 @@ from crm_desktop.adapters.quote_pdf import export_quote_pdf
 from crm_desktop.adapters.rus_export import RusLine, export_rus_variant_a
 from crm_desktop.repositories import audit, calculation_sessions, clients, global_discounts, products, promotions, settings as settings_repo
 from crm_desktop.services import email_send
+from crm_desktop.services.bonus_cost_split import parts_main_gift_even, parts_main_gift_ratio, split_amount_by_boxes
 from crm_desktop.services.order_number import confirm_order_number, next_order_number
 from crm_desktop.services.bonus import (
     BonusRule,
@@ -389,6 +390,53 @@ class QuoteTab(QWidget):
     ) -> BonusRule | None:
         return find_best_threshold(thresholds, qty)
 
+    def _main_row_financials(
+        self, r: int, qd: date_type, client_pct: float, total_boxes: float
+    ) -> tuple[object, float, float, float, float, float, dict] | None:
+        """Данные основной строки: p, qty, ep, sub_no_prepay, sub_full, floor_total, matrix_rules."""
+        if self._is_bonus_row(r):
+            return None
+        w = self._table.cellWidget(r, _C_NAME)
+        if not isinstance(w, QComboBox):
+            return None
+        pid = w.currentData()
+        p = products.get(self._conn, int(pid)) if pid is not None else None
+        if not p:
+            return None
+        qty_it = self._table.item(r, _C_QTY)
+        try:
+            qty = float((qty_it.text().strip() if qty_it else "1").replace(",", "."))
+        except ValueError:
+            qty = 0.0
+        ep = self._effective_price(p)
+        promo = promotions.get_for_product(self._conn, p.id)
+        vf    = parse_iso(promo.valid_from_iso) if promo else None
+        vt    = parse_iso(promo.valid_to_iso)   if promo else None
+        disc  = promo.discount_percent           if promo else 0.0
+        matrix_rules = self._get_matrix_rules(promo)
+        prepay_disc  = self._prepay_discount_for(matrix_rules)
+        volume_disc  = self._volume_discount_for(matrix_rules, total_boxes)
+        product_disc = self._product_discount_for(matrix_rules)
+        sub_no_prepay = line_total(
+            ep, qty, disc, qd, vf, vt,
+            client_type_pct=client_pct,
+            prepay_pct=0.0,
+        )
+        sub_full = line_total(
+            ep, qty, disc, qd, vf, vt,
+            client_type_pct=client_pct,
+            prepay_pct=prepay_disc,
+            volume_pct=volume_disc,
+            product_pct=product_disc,
+        )
+        floor_total = 0.0
+        floor_pct = float(matrix_rules.get("price_floor_pct", 0) or 0)
+        if floor_pct > 0 and qty > 0:
+            floor_total = ep * qty * floor_pct / 100
+            if sub_full < floor_total:
+                sub_full = round(floor_total, 2)
+        return p, qty, ep, sub_no_prepay, sub_full, floor_total, matrix_rules
+
     def _remove_bonus_rows_after(self, main_row: int) -> None:
         while True:
             nxt = main_row + 1
@@ -712,8 +760,128 @@ class QuoteTab(QWidget):
 
             r += 1
 
-        self._total.setText(f"{total_with_prepay:.2f}")
-        self._update_prepay_label(total_no_prepay, total_with_prepay)
+        self._apply_bonus_catalog_cost_split(
+            qd, client_pct, total_boxes, total_no_prepay, total_with_prepay,
+        )
+
+    def _read_main_line_sum(self, r: int) -> float | None:
+        it = self._table.item(r, _C_SUM)
+        if not it:
+            return None
+        try:
+            return float(it.text().replace(",", ".").strip())
+        except ValueError:
+            return None
+
+    def _apply_bonus_catalog_cost_split(
+        self,
+        qd: date_type,
+        client_pct: float,
+        total_boxes: float,
+        total_no_prepay: float,
+        total_with_prepay: float,
+    ) -> None:
+        """Учесть каталожную стоимость подарков: списать долю с оплачиваемых строк."""
+        bonus_rows: list[tuple[int, object, float, float, float]] = []
+        for r in range(self._table.rowCount()):
+            if not self._is_bonus_row(r):
+                continue
+            pid_it = self._table.item(r, _C_PID)
+            qty_it = self._table.item(r, _C_QTY)
+            try:
+                bp = products.get(self._conn, int(pid_it.text())) if pid_it else None
+                bqty = float((qty_it.text() if qty_it else "0").replace(",", "."))
+            except (ValueError, TypeError):
+                bp, bqty = None, 0.0
+            if not bp:
+                continue
+            ep_b = self._effective_price(bp)
+            cat_v = round(ep_b * bqty, 2)
+            bonus_rows.append((r, bp, bqty, ep_b, cat_v))
+
+        def _bro_y(val: str) -> QTableWidgetItem:
+            it = QTableWidgetItem(val)
+            it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            it.setBackground(Qt.GlobalColor.yellow)
+            it.setForeground(Qt.GlobalColor.black)
+            return it
+
+        for r, bp, bqty, ep_b, _cv in bonus_rows:
+            self._table.setItem(r, _C_UPB,       _bro_y(str(bp.units_per_box)))
+            self._table.setItem(r, _C_PIECE,     _bro_y(str(bp.regular_piece_price)))
+            self._table.setItem(r, _C_BOX,       _bro_y(str(ep_b)))
+            self._table.setItem(r, _C_BOX_NET,   _bro_y("0"))
+            self._table.setItem(r, _C_PIECE_NET, _bro_y("0"))
+            self._table.setItem(r, _C_SUM,       _bro_y("0"))
+
+        n_gift = sum(x[2] for x in bonus_rows)
+        if n_gift <= 0 or not bonus_rows:
+            self._total.setText(f"{total_with_prepay:.2f}")
+            self._update_prepay_label(total_no_prepay, total_with_prepay)
+            return
+
+        main_rows: list[
+            tuple[int, object, float, float, float, float, float, dict]
+        ] = []
+        for r in range(self._table.rowCount()):
+            fin = self._main_row_financials(r, qd, client_pct, total_boxes)
+            if fin is None:
+                continue
+            p, qty, ep, sub_np, sub_f, floor_total, mr = fin
+            main_rows.append((r, p, qty, ep, sub_np, sub_f, floor_total, mr))
+
+        if not main_rows:
+            self._total.setText(f"{total_with_prepay:.2f}")
+            self._update_prepay_label(total_no_prepay, total_with_prepay)
+            return
+
+        V = round(sum(x[4] for x in bonus_rows), 2)
+        if V <= 0:
+            self._total.setText(f"{total_with_prepay:.2f}")
+            self._update_prepay_label(total_no_prepay, total_with_prepay)
+            return
+
+        n_main = sum(x[2] for x in main_rows)
+        if n_main <= 0:
+            self._total.setText(f"{total_with_prepay:.2f}")
+            self._update_prepay_label(total_no_prepay, total_with_prepay)
+            return
+
+        mode = (settings_repo.get(self._conn, "bonus_cost_split_mode", "even") or "even").strip().lower()
+        main_pct = float(settings_repo.get(self._conn, "bonus_cost_main_pct", "50") or "50")
+        if mode == "ratio":
+            part_main, _ = parts_main_gift_ratio(V, main_pct)
+        else:
+            part_main, _ = parts_main_gift_even(V, n_main, n_gift)
+
+        cuts = split_amount_by_boxes(part_main, [x[2] for x in main_rows])
+
+        new_total_np = 0.0
+        new_total_f = 0.0
+
+        for (r, p, qty, ep, sub_np, sub_f, floor_total, _mr), cut in zip(main_rows, cuts):
+            new_f = round(sub_f - cut, 2)
+            new_np = round(sub_np - cut, 2)
+            if floor_total > 0 and new_f < floor_total:
+                new_f = round(floor_total, 2)
+
+            new_total_f += new_f
+            new_total_np += new_np
+
+            net_box = round(new_f / qty, 2) if qty > 0 else ep
+            net_piece = round(net_box / p.units_per_box, 4) if p.units_per_box > 0 else net_box
+
+            def _ro2(val: str) -> QTableWidgetItem:
+                it = QTableWidgetItem(val)
+                it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                return it
+
+            self._table.setItem(r, _C_PIECE_NET, _ro2(f"{net_piece:.4f}"))
+            self._table.setItem(r, _C_BOX_NET,   _ro2(f"{net_box:.2f}"))
+            self._table.setItem(r, _C_SUM,       _ro2(f"{new_f:.2f}"))
+
+        self._total.setText(f"{new_total_f:.2f}")
+        self._update_prepay_label(new_total_np, new_total_f)
         # _block сбрасывается в finally блоке _recalc
 
     # ─────────────────────────────────────────────────────────
@@ -770,16 +938,20 @@ class QuoteTab(QWidget):
             prd   = self._product_discount_for(mr)
 
             ep = self._effective_price(p)
-            sub = line_total(
-                ep, qty, disc, qd, vf, vt,
-                client_type_pct=client_pct,
-                prepay_pct=pd, volume_pct=vd, product_pct=prd,
-            )
-            floor_pct = float(mr.get("price_floor_pct", 0) or 0)
-            if floor_pct > 0 and qty > 0:
-                floor_total = ep * qty * floor_pct / 100
-                if sub < floor_total:
-                    sub = round(floor_total, 2)
+            sub_tbl = self._read_main_line_sum(r)
+            if sub_tbl is not None:
+                sub = sub_tbl
+            else:
+                sub = line_total(
+                    ep, qty, disc, qd, vf, vt,
+                    client_type_pct=client_pct,
+                    prepay_pct=pd, volume_pct=vd, product_pct=prd,
+                )
+                floor_pct = float(mr.get("price_floor_pct", 0) or 0)
+                if floor_pct > 0 and qty > 0:
+                    floor_total = ep * qty * floor_pct / 100
+                    if sub < floor_total:
+                        sub = round(floor_total, 2)
             grand += sub
             discounts = []
             if pd > 0:  discounts.append(f"предоплата −{pd:.0f}%")
@@ -842,24 +1014,30 @@ class QuoteTab(QWidget):
             pd    = self._prepay_discount_for(mr)
             vd    = self._volume_discount_for(mr, total_boxes)
             prd   = self._product_discount_for(mr)
-            applied = disc if (vf and vt and vf <= qd <= vt and disc > 0) else 0.0
             ep = self._effective_price(p)
-            sub = line_total(
-                ep, qty, disc, qd, vf, vt,
-                client_type_pct=client_pct,
-                prepay_pct=pd, volume_pct=vd, product_pct=prd,
-            )
-            floor_pct = float(mr.get("price_floor_pct", 0) or 0)
-            if floor_pct > 0 and qty > 0:
-                floor_total = ep * qty * floor_pct / 100
-                if sub < floor_total:
-                    sub = round(floor_total, 2)
+            sub = self._read_main_line_sum(r)
+            if sub is None:
+                sub = line_total(
+                    ep, qty, disc, qd, vf, vt,
+                    client_type_pct=client_pct,
+                    prepay_pct=pd, volume_pct=vd, product_pct=prd,
+                )
+                floor_pct = float(mr.get("price_floor_pct", 0) or 0)
+                if floor_pct > 0 and qty > 0:
+                    floor_total = ep * qty * floor_pct / 100
+                    if sub < floor_total:
+                        sub = round(floor_total, 2)
+            gross = ep * qty
+            if gross > 0:
+                disc_eff = min(100.0, max(0.0, (1.0 - sub / gross) * 100.0))
+            else:
+                disc_eff = 0.0
             total += sub
             payload.append(calculation_sessions.SessionLine(
                 product_id=p.id,
                 product_external_id=p.external_id or "",
                 product_name=p.name, qty=qty, base_price=ep,
-                discount_percent=applied + client_pct + pd + vd + prd,
+                discount_percent=disc_eff,
                 line_total=sub,
             ))
         return total, payload
@@ -960,20 +1138,24 @@ class QuoteTab(QWidget):
             pd    = self._prepay_discount_for(mr)
             vd    = self._volume_discount_for(mr, total_boxes)
             prd   = self._product_discount_for(mr)
-            promo_disc = disc if (vf and vt and vf <= qd <= vt and disc > 0) else 0.0
-            total_disc = min(promo_disc + client_pct + pd + vd + prd, 100.0)
-
             ep = self._effective_price(p)
-            sub = line_total(
-                ep, qty, disc, qd, vf, vt,
-                client_type_pct=client_pct,
-                prepay_pct=pd, volume_pct=vd, product_pct=prd,
-            )
-            floor_pct = float(mr.get("price_floor_pct", 0) or 0)
-            if floor_pct > 0 and qty > 0:
-                floor_total = ep * qty * floor_pct / 100
-                if sub < floor_total:
-                    sub = round(floor_total, 2)
+            sub = self._read_main_line_sum(r)
+            if sub is None:
+                sub = line_total(
+                    ep, qty, disc, qd, vf, vt,
+                    client_type_pct=client_pct,
+                    prepay_pct=pd, volume_pct=vd, product_pct=prd,
+                )
+                floor_pct = float(mr.get("price_floor_pct", 0) or 0)
+                if floor_pct > 0 and qty > 0:
+                    floor_total = ep * qty * floor_pct / 100
+                    if sub < floor_total:
+                        sub = round(floor_total, 2)
+            gross = ep * qty
+            if gross > 0:
+                total_disc = min(100.0, max(0.0, (1.0 - sub / gross) * 100.0))
+            else:
+                total_disc = 0.0
 
             export_mr = dict(mr)
             if pd  > 0: export_mr["_applied_prepay_pct"]  = pd

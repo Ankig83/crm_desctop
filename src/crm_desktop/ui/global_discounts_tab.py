@@ -3,18 +3,21 @@ from __future__ import annotations
 import sqlite3
 
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QMessageBox,
     QPushButton,
+    QRadioButton,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from crm_desktop.repositories import global_discounts
+from crm_desktop.repositories import global_discounts, settings as settings_repo
 
 
 class GlobalDiscountsTab(QWidget):
@@ -89,6 +92,34 @@ class GlobalDiscountsTab(QWidget):
         vol_lay.addLayout(vol_btns)
         root.addWidget(gb_vol)
 
+        # ── Распределение стоимости подарков (расчёт) ─────────────────
+        gb_bonus = QGroupBox("Стоимость подарочных коробок в расчёте заказа")
+        b_lay = QVBoxLayout(gb_bonus)
+        b_lay.addWidget(QLabel(
+            "Каталожная стоимость всех подарочных коробок списывается с оплачиваемых строк "
+            "(одна общая сумма; округление до копеек). Подарки в заказе по-прежнему 0 ₽ для клиента."
+        ))
+        b_lay.addWidget(QLabel("Как делить сумму подарков между основными и подарочными коробками:"))
+        self._bonus_split_group = QButtonGroup(self)
+        self._radio_bonus_even = QRadioButton(
+            "Поровну по коробкам: доля основных = N_осн / (N_осн + N_подар)"
+        )
+        self._radio_bonus_ratio = QRadioButton("Своя доля на основной товар:")
+        self._bonus_split_group.addButton(self._radio_bonus_even, 0)
+        self._bonus_split_group.addButton(self._radio_bonus_ratio, 1)
+        b_lay.addWidget(self._radio_bonus_even)
+        row_r = QHBoxLayout()
+        row_r.addWidget(self._radio_bonus_ratio)
+        self._bonus_main_pct = QSpinBox()
+        self._bonus_main_pct.setRange(0, 100)
+        self._bonus_main_pct.setSuffix(" %")
+        self._bonus_main_pct.setMaximumWidth(90)
+        row_r.addWidget(self._bonus_main_pct)
+        row_r.addWidget(QLabel("(остальное — на долю подарочных коробок, без изменения их суммы 0 ₽)"))
+        row_r.addStretch()
+        b_lay.addLayout(row_r)
+        root.addWidget(gb_bonus)
+
         # ── Кнопка сохранения ─────────────────────────────────────────
         btn_save = QPushButton("💾  Сохранить")
         btn_save.setFixedHeight(36)
@@ -103,6 +134,16 @@ class GlobalDiscountsTab(QWidget):
     def reload(self) -> None:
         self._load_table(self._prepay_table, "prepay")
         self._load_table(self._volume_table, "volume")
+        mode = (settings_repo.get(self._conn, "bonus_cost_split_mode", "even") or "even").strip().lower()
+        if mode == "ratio":
+            self._radio_bonus_ratio.setChecked(True)
+        else:
+            self._radio_bonus_even.setChecked(True)
+        try:
+            p = int(float(settings_repo.get(self._conn, "bonus_cost_main_pct", "90") or "90"))
+        except ValueError:
+            p = 90
+        self._bonus_main_pct.setValue(max(0, min(100, p)))
 
     # ── внутренние методы ─────────────────────────────────────────────
 
@@ -155,4 +196,7 @@ class GlobalDiscountsTab(QWidget):
             return
         global_discounts.set_rules(self._conn, "prepay", pre_rules)
         global_discounts.set_rules(self._conn, "volume", vol_rules)
-        QMessageBox.information(self, "Сохранено", "Глобальные скидки сохранены.")
+        mode = "ratio" if self._radio_bonus_ratio.isChecked() else "even"
+        settings_repo.set_value(self._conn, "bonus_cost_split_mode", mode)
+        settings_repo.set_value(self._conn, "bonus_cost_main_pct", str(self._bonus_main_pct.value()))
+        QMessageBox.information(self, "Сохранено", "Настройки скидок и распределения подарков сохранены.")
